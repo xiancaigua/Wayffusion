@@ -1,0 +1,8 @@
+mode: multitask
+env_config: configs/env/multitask.yaml
+policies:
+  - heuristic
+  - random
+episodes: 80
+save_rollouts: true
+output_dir: outputs/eval/multitask

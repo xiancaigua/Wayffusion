@@ -1,0 +1,18 @@
+name: cnn_deepsets_ppo
+type: ppo
+policy_class: cnn_deepsets
+cnn_channels: [16, 32, 64]
+agent_hidden_dim: 64
+joint_hidden_dim: 256
+rollout_steps: 256
+total_updates: 12
+epochs: 4
+minibatch_size: 64
+gamma: 0.99
+gae_lambda: 0.95
+clip_coef: 0.2
+ent_coef: 0.01
+vf_coef: 0.5
+learning_rate: 0.0003
+max_grad_norm: 0.5
+eval_interval: 4

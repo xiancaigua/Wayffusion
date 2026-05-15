@@ -1,0 +1,11 @@
+name: bc_attention
+algorithm: bc
+policy_class: attention
+cnn_channels: [16, 32, 64]
+embed_dim: 128
+num_heads: 4
+num_layers: 2
+batch_size: 64
+epochs: 10
+learning_rate: 0.0003
+eval_interval: 2

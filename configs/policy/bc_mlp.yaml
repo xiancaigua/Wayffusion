@@ -1,0 +1,8 @@
+name: bc_mlp
+algorithm: bc
+policy_class: mlp
+hidden_dims: [256, 256]
+batch_size: 64
+epochs: 10
+learning_rate: 0.0003
+eval_interval: 2
