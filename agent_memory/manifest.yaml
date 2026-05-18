@@ -1,0 +1,52 @@
+version: 1
+generated_on: "2026-05-15"
+module: agent_memory
+cards:
+  - id: audit_scope
+    title: "Audit Scope and Method"
+    file: cards/00_audit_scope.md
+    trust: trusted
+    tags: [stage:intake-audit, type:state-audit, state:trusted]
+    summary: "Defines audit coverage, evidence sources, trust ranking, and the limits of the current audit."
+  - id: system_contract
+    title: "System Contract and Core Design"
+    file: cards/01_system_contract.md
+    trust: trusted
+    tags: [type:system-contract, state:trusted]
+    summary: "Records the centralized single-policy problem setup, shared observation/action contract, and task families."
+  - id: training_pipeline
+    title: "Training Pipeline and Artifacts"
+    file: cards/02_training_pipeline.md
+    trust: trusted
+    tags: [type:training-pipeline, state:trusted]
+    summary: "Tracks training entrypoints, stopping rules, media capture, tensorboard, checkpoint/snapshot layout, and evaluation hooks."
+  - id: recent_modifications
+    title: "Recent Applied Modifications"
+    file: cards/03_recent_modifications.md
+    trust: trusted
+    tags: [type:change-log, state:trusted]
+    summary: "Consolidates recent feature and workflow changes into a durable maintenance log."
+  - id: audit_findings
+    title: "Audit Findings and Risk List"
+    file: cards/04_audit_findings.md
+    trust: usable_with_verification
+    tags: [type:findings, state:needs-verification]
+    summary: "Summarizes trusted assets, risk items, stale outputs, and maintenance drift that still needs repair."
+  - id: reuse_rules
+    title: "Reuse Rules and Trust Matrix"
+    file: cards/05_reuse_rules.md
+    trust: trusted
+    tags: [type:reuse-rule, state:trusted]
+    summary: "Defines how code, configs, docs, outputs, and experiment artifacts should be reused safely."
+  - id: next_actions
+    title: "Recommended Next Actions"
+    file: cards/06_next_actions.md
+    trust: usable_with_verification
+    tags: [type:route-handoff, state:needs-verification]
+    summary: "Provides a practical execution order for follow-up work, split into higher and lower priority items."
+  - id: maintenance_protocol
+    title: "Maintenance Protocol"
+    file: cards/07_maintenance_protocol.md
+    trust: trusted
+    tags: [type:process-rule, state:trusted]
+    summary: "Defines the mandatory rule that every repo change must be mirrored into agent_memory before the task is considered complete."

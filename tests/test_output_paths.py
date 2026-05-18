@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 
-from scripts._common import latest_checkpoint, run_dir_from_checkpoint, save_run_snapshot, timestamped_training_dir
+from scripts._common import latest_checkpoint, run_dir_from_checkpoint, save_run_snapshot, tensorboard_dir, timestamped_training_dir
 
 
 def test_timestamped_training_dir_inserts_time_layer():
@@ -42,3 +42,13 @@ def test_snapshot_and_recursive_checkpoint_lookup():
     assert run_dir_from_checkpoint(checkpoint_path) == run_dir
 
     shutil.rmtree(run_dir)
+
+
+def test_tensorboard_dir_is_sibling_under_run_dir():
+    output_dir = timestamped_training_dir("ppo", "tb_demo", timestamp="20260515_120000")
+    tb_dir = tensorboard_dir(output_dir)
+
+    assert tb_dir.name == "tensorboard"
+    assert tb_dir.parent == output_dir
+
+    shutil.rmtree(output_dir.parent)

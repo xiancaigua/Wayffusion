@@ -15,12 +15,15 @@ from policies import build_policy
 from scripts._common import (
     baseline_reference_episodes_for_agent_count,
     baseline_reference_table,
+    build_metric_logger,
     format_agent_set_name,
     format_obs_variant_name,
     format_task_set_name,
+    log_scalar_metrics,
     load_generic_config,
     normalize_task_names,
     observation_override_from_variant,
+    print_progress_line,
     prepare_env_config,
     save_run_snapshot,
     timestamped_training_dir,
@@ -40,6 +43,8 @@ def main():
     parser.add_argument("--init_checkpoint", default=None)
     parser.add_argument("--eval_episodes", type=int, default=5)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--console_log_interval", type=int, default=1024)
     parser.add_argument("--record_eval_episodes", type=int, default=0)
     parser.add_argument("--record_format", choices=["gif", "mp4"], default="gif")
     parser.add_argument("--record_fps", type=int, default=8)
@@ -73,58 +78,88 @@ def main():
         model_state_dict=trainer.actor.state_dict(),
         extra_metadata={"task_names": task_names, "agent_counts": [agent_count], "output_root": output_root},
     )
-    metrics = trainer.train(
+    writer, log_record = build_metric_logger(
         output_dir,
-        eval_env=env_batch.envs[0],
-        eval_episodes=args.eval_episodes,
-        headless=args.headless,
-        record_eval_episodes=args.record_eval_episodes,
-        record_format=args.record_format,
-        record_fps=args.record_fps,
-        record_interval=args.record_interval,
-    )
-    write_metrics_csv(metrics, output_dir / "training_metrics.csv")
-
-    from envs import CentralizedMultiUAVEnv
-
-    eval_env = CentralizedMultiUAVEnv(env_config)
-    final_media_dir = output_dir / "final_eval_media" if args.record_eval_episodes > 0 else None
-    eval_records = evaluate_policy_episodes(
-        eval_env,
-        trainer.actor,
-        args.eval_episodes,
-        trainer.device,
-        headless=args.headless,
-        record_dir=final_media_dir,
-        record_episodes=min(int(args.record_eval_episodes), int(args.eval_episodes)),
-        record_format=args.record_format,
-        record_fps=args.record_fps,
-        record_prefix=f"final_eval_N{agent_count}",
-    )
-    reference_table = baseline_reference_table(
-        env_config,
-        episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
-    )
-    normalized_records = [apply_reference_normalization(record, reference_table) for record in eval_records]
-    summary = aggregate_episode_records(normalized_records)
-    write_metrics_csv(
-        [
-            {
-                "method": "bc_td3" if args.init_checkpoint else "td3",
-                "algorithm": "td3",
-                "architecture": config["policy_class"],
-                "observation_mode": env_config.get("observation_mode", "multi_channel_field"),
-                "task_set": format_task_set_name(task_names),
-                "task_name": "multitask" if len(task_names) > 1 else task_names[0],
-                "num_agents": agent_count,
-                "scaling_mode": args.scaling_mode,
-                "seed": int(env_config.get("seed", 0)),
-                "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
-                **summary,
-            }
+        namespace=f"{output_root}/train",
+        step_key="step",
+        tensorboard_enabled=args.tensorboard,
+        console_interval=args.console_log_interval,
+        key_order=[
+            "rollout_reward",
+            "actor_loss",
+            "critic_loss",
+            "memory_usage_mb",
+            "inference_latency_ms",
+            "eval_reward",
+            "eval_success_rate",
         ],
-        output_dir / "eval_metrics.csv",
     )
+    try:
+        metrics = trainer.train(
+            output_dir,
+            eval_env=env_batch.envs[0],
+            eval_episodes=args.eval_episodes,
+            headless=args.headless,
+            record_eval_episodes=args.record_eval_episodes,
+            record_format=args.record_format,
+            record_fps=args.record_fps,
+            record_interval=args.record_interval,
+            log_callback=log_record,
+        )
+        write_metrics_csv(metrics, output_dir / "training_metrics.csv")
+
+        from envs import CentralizedMultiUAVEnv
+
+        eval_env = CentralizedMultiUAVEnv(env_config)
+        final_media_dir = output_dir / "final_eval_media" if args.record_eval_episodes > 0 else None
+        eval_records = evaluate_policy_episodes(
+            eval_env,
+            trainer.actor,
+            args.eval_episodes,
+            trainer.device,
+            headless=args.headless,
+            record_dir=final_media_dir,
+            record_episodes=min(int(args.record_eval_episodes), int(args.eval_episodes)),
+            record_format=args.record_format,
+            record_fps=args.record_fps,
+            record_prefix=f"final_eval_N{agent_count}",
+        )
+        reference_table = baseline_reference_table(
+            env_config,
+            episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
+        )
+        normalized_records = [apply_reference_normalization(record, reference_table) for record in eval_records]
+        summary = aggregate_episode_records(normalized_records)
+        final_step = int(metrics[-1].get("step", trainer.total_steps)) if metrics else int(trainer.total_steps)
+        log_scalar_metrics(writer, f"{output_root}/final_eval/N{agent_count}", final_step, summary)
+        print_progress_line(
+            f"{output_root}-final",
+            "num_agents",
+            agent_count,
+            summary,
+            key_order=["return_mean", "normalized_score_mean", "success_rate_mean", "collision_rate_mean"],
+        )
+        write_metrics_csv(
+            [
+                {
+                    "method": "bc_td3" if args.init_checkpoint else "td3",
+                    "algorithm": "td3",
+                    "architecture": config["policy_class"],
+                    "observation_mode": env_config.get("observation_mode", "multi_channel_field"),
+                    "task_set": format_task_set_name(task_names),
+                    "task_name": "multitask" if len(task_names) > 1 else task_names[0],
+                    "num_agents": agent_count,
+                    "scaling_mode": args.scaling_mode,
+                    "seed": int(env_config.get("seed", 0)),
+                    "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
+                    **summary,
+                }
+            ],
+            output_dir / "eval_metrics.csv",
+        )
+    finally:
+        if writer is not None:
+            writer.close()
     print(f"td3_output={output_dir}")
 
 

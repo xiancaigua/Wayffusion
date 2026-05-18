@@ -4,6 +4,7 @@ import random
 import time
 from collections import deque
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -204,6 +205,7 @@ class SACTrainer:
         record_format: str = "gif",
         record_fps: int = 8,
         record_interval: int = 1,
+        log_callback: Callable[[dict], None] | None = None,
     ) -> list[dict]:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -252,7 +254,16 @@ class SACTrainer:
                 while next_eval_step <= self.total_steps:
                     next_eval_step += eval_interval_steps
             metrics.append(record)
+            if log_callback is not None:
+                log_callback(record)
         checkpoint = checkpoints_dir / "checkpoint_final.pt"
         torch.save({"model_state_dict": self.actor.state_dict(), "train_config": self.train_config}, checkpoint)
-        metrics.append({"checkpoint_path": str(checkpoint), "wall_clock_time": float(time.perf_counter() - start)})
+        final_record = {
+            "step": self.total_steps,
+            "checkpoint_path": str(checkpoint),
+            "wall_clock_time": float(time.perf_counter() - start),
+        }
+        metrics.append(final_record)
+        if log_callback is not None:
+            log_callback(final_record)
         return metrics

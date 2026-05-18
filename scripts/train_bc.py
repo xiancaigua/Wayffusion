@@ -15,14 +15,17 @@ from policies import build_policy
 from scripts._common import (
     baseline_reference_episodes_for_agent_count,
     baseline_reference_table,
+    build_metric_logger,
     ensure_dir,
     format_agent_set_name,
     format_obs_variant_name,
     format_task_set_name,
     latest_checkpoint,
+    log_scalar_metrics,
     load_generic_config,
     normalize_task_names,
     observation_override_from_variant,
+    print_progress_line,
     prepare_env_config,
     save_run_snapshot,
     timestamped_training_dir,
@@ -50,6 +53,8 @@ def main():
     parser.add_argument("--obs_variant", default="multi_channel_field+task_id")
     parser.add_argument("--eval_episodes", type=int, default=5)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--console_log_interval", type=int, default=1)
     parser.add_argument("--record_eval_episodes", type=int, default=0)
     parser.add_argument("--record_format", choices=["gif", "mp4"], default="gif")
     parser.add_argument("--record_fps", type=int, default=8)
@@ -86,58 +91,79 @@ def main():
         model_state_dict=trainer.policy.state_dict(),
         extra_metadata={"task_names": task_names, "agent_counts": agent_counts, "output_root": "bc"},
     )
-    history = trainer.train(dataset, output_dir)
-    write_metrics_csv(history, output_dir / "training_metrics.csv")
+    writer, log_record = build_metric_logger(
+        output_dir,
+        namespace="bc/train",
+        step_key="epoch",
+        tensorboard_enabled=args.tensorboard,
+        console_interval=args.console_log_interval,
+        key_order=["bc_loss", "epoch_time_sec", "wall_clock_time", "memory_usage_mb"],
+    )
+    try:
+        history = trainer.train(dataset, output_dir, log_callback=log_record)
+        write_metrics_csv(history, output_dir / "training_metrics.csv")
 
-    final_checkpoint = latest_checkpoint(output_dir)
-    if final_checkpoint is None:
-        raise RuntimeError("BC training did not produce a checkpoint.")
-    eval_records = []
-    trainer.policy.load_state_dict(torch.load(final_checkpoint, map_location=trainer.device)["model_state_dict"], strict=False)
-    for agent_count in agent_counts:
-        eval_env_config = prepare_env_config(
-            args.env_config,
-            tasks=task_names,
-            num_agents=agent_count,
-            scaling_mode=args.scaling_mode,
-            observation_override=observation_override_from_variant(args.obs_variant),
-        )
-        eval_env = CentralizedMultiUAVEnv(eval_env_config)
-        final_media_dir = output_dir / "final_eval_media" / f"N{agent_count}" if args.record_eval_episodes > 0 else None
-        records = evaluate_policy_episodes(
-            eval_env,
-            trainer.policy,
-            args.eval_episodes,
-            trainer.device,
-            headless=args.headless,
-            record_dir=final_media_dir,
-            record_episodes=min(int(args.record_eval_episodes), int(args.eval_episodes)),
-            record_format=args.record_format,
-            record_fps=args.record_fps,
-            record_prefix=f"final_eval_N{agent_count}",
-        )
-        reference_table = baseline_reference_table(
-            eval_env_config,
-            episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
-        )
-        normalized_records = [apply_reference_normalization(record, reference_table) for record in records]
-        summary = aggregate_episode_records(normalized_records)
-        eval_records.append(
-            {
-                "method": "bc",
-                "algorithm": "bc",
-                "architecture": policy_config["policy_class"],
-                "observation_mode": eval_env_config.get("observation_mode", "multi_channel_field"),
-                "task_set": format_task_set_name(task_names),
-                "task_name": "multitask" if len(task_names) > 1 else task_names[0],
-                "num_agents": agent_count,
-                "scaling_mode": args.scaling_mode,
-                "seed": int(eval_env_config.get("seed", 0)),
-                "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
-                **summary,
-            }
-        )
-    write_metrics_csv(eval_records, output_dir / "eval_metrics.csv")
+        final_checkpoint = latest_checkpoint(output_dir)
+        if final_checkpoint is None:
+            raise RuntimeError("BC training did not produce a checkpoint.")
+        eval_records = []
+        trainer.policy.load_state_dict(torch.load(final_checkpoint, map_location=trainer.device)["model_state_dict"], strict=False)
+        final_epoch = int(history[-1].get("epoch", 0)) if history else 0
+        for agent_count in agent_counts:
+            eval_env_config = prepare_env_config(
+                args.env_config,
+                tasks=task_names,
+                num_agents=agent_count,
+                scaling_mode=args.scaling_mode,
+                observation_override=observation_override_from_variant(args.obs_variant),
+            )
+            eval_env = CentralizedMultiUAVEnv(eval_env_config)
+            final_media_dir = output_dir / "final_eval_media" / f"N{agent_count}" if args.record_eval_episodes > 0 else None
+            records = evaluate_policy_episodes(
+                eval_env,
+                trainer.policy,
+                args.eval_episodes,
+                trainer.device,
+                headless=args.headless,
+                record_dir=final_media_dir,
+                record_episodes=min(int(args.record_eval_episodes), int(args.eval_episodes)),
+                record_format=args.record_format,
+                record_fps=args.record_fps,
+                record_prefix=f"final_eval_N{agent_count}",
+            )
+            reference_table = baseline_reference_table(
+                eval_env_config,
+                episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
+            )
+            normalized_records = [apply_reference_normalization(record, reference_table) for record in records]
+            summary = aggregate_episode_records(normalized_records)
+            log_scalar_metrics(writer, f"bc/final_eval/N{agent_count}", final_epoch, summary)
+            print_progress_line(
+                "bc-final",
+                "num_agents",
+                agent_count,
+                summary,
+                key_order=["return_mean", "normalized_score_mean", "success_rate_mean", "collision_rate_mean"],
+            )
+            eval_records.append(
+                {
+                    "method": "bc",
+                    "algorithm": "bc",
+                    "architecture": policy_config["policy_class"],
+                    "observation_mode": eval_env_config.get("observation_mode", "multi_channel_field"),
+                    "task_set": format_task_set_name(task_names),
+                    "task_name": "multitask" if len(task_names) > 1 else task_names[0],
+                    "num_agents": agent_count,
+                    "scaling_mode": args.scaling_mode,
+                    "seed": int(eval_env_config.get("seed", 0)),
+                    "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
+                    **summary,
+                }
+            )
+        write_metrics_csv(eval_records, output_dir / "eval_metrics.csv")
+    finally:
+        if writer is not None:
+            writer.close()
     print(f"bc_output={output_dir}")
 
 

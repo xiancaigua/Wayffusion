@@ -32,6 +32,7 @@ If you prefer to avoid activation, every command below also works as:
 - `baselines/`: random and heuristic waypoint baselines
 - `policies/`: `MLP`, `CNN + DeepSets`, and `CNN + Attention` policies
 - `algorithms/`: PPO, SAC, TD3, and BC trainers
+- `agent_memory/`: durable audit memories, trust judgments, and a lightweight loader for future agents
 - `scripts/check/`: smoke-check rollouts, live visualization, and reward diagnostics
 - `scripts/`: dataset generation, training, evaluation, and scaling experiments
 - `docs/`: benchmark spec, learning baselines, scaling, reward normalization, and evaluation protocol
@@ -87,6 +88,8 @@ Training command convention:
 - `scripts/train_ppo.py` supports both `--total_updates` and `--target_episodes`; if you want classic PPO stopping, pass `--target_episodes 0` and control training with `--total_updates`
 - training-time visualization is evaluation-only: use `--no-headless` to open live rollout windows during periodic eval, and keep `--headless` for normal throughput
 - use `--record_eval_episodes <K>` to save the first `K` eval episodes each eval pass, plus `--record_format gif|mp4`, `--record_fps`, and `--record_interval` to control periodic media capture
+- TensorBoard is enabled by default on all training scripts; event files are written to `outputs/training/.../tensorboard/`
+- use `--console_log_interval` to control live stdout feedback on the trainer's native progress axis: PPO updates, SAC/TD3 environment steps, BC epochs
 
 Train BC:
 
@@ -108,8 +111,15 @@ Train PPO from scratch:
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_mlp.yaml --tasks goal_nav coverage --agent_counts 4
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 4 8 10
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 4 --no-headless --record_eval_episodes 1 --record_format gif
+.\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 4 --tensorboard --console_log_interval 5
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets_multitask_20k.yaml --tasks goal_nav coverage formation risk_nav --agent_counts 4 --total_updates 850 --target_episodes 0
 .\scripts\run_multitask_ppo_20k.ps1
+```
+
+View TensorBoard for training runs:
+
+```powershell
+.\.venv\Scripts\python.exe -m tensorboard.main --logdir outputs/training
 ```
 
 Train BC + PPO:
@@ -170,6 +180,7 @@ pytest tests/
 - `outputs/training/<algorithm>/<timestamp>/<run_name>/`: BC, PPO, SAC, TD3, and BC+PPO training curves/checkpoints
 - `outputs/training/.../checkpoints/`: saved model weights and periodic/final checkpoints
 - `outputs/training/.../snapshot/`: training-start snapshot with initial model weights plus config / CLI metadata
+- `outputs/training/.../tensorboard/`: TensorBoard event files for live training curves and final eval summaries
 - `outputs/training/.../media/`: periodic training-eval GIF/MP4 captures when `--record_eval_episodes` is enabled
 - `outputs/training/.../final_eval_media/`: final evaluation GIF/MP4 captures for BC / PPO / SAC / TD3 runs when recording is enabled
 - `outputs/eval/...`: policy, scaling, and algorithm-comparison tables

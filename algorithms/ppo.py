@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -271,6 +272,7 @@ class PPOTrainer:
         record_format: str = "gif",
         record_fps: int = 8,
         record_interval: int = 1,
+        log_callback: Callable[[dict], None] | None = None,
     ) -> list[dict]:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -319,6 +321,8 @@ class PPOTrainer:
                 )
                 record["checkpoint_path"] = str(checkpoint_path)
             metrics_history.append(record)
+            if log_callback is not None:
+                log_callback(record)
             if target_episodes > 0 and self.completed_episodes >= target_episodes:
                 break
         return metrics_history

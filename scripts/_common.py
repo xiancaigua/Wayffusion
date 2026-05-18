@@ -3,9 +3,10 @@ from __future__ import annotations
 import csv
 from copy import deepcopy
 from datetime import datetime
+from numbers import Number
 from pathlib import Path
 import sys
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import yaml
@@ -70,6 +71,10 @@ def checkpoints_dir(run_dir: str | Path) -> Path:
 
 def snapshot_dir(run_dir: str | Path) -> Path:
     return ensure_dir(Path(run_dir) / "snapshot")
+
+
+def tensorboard_dir(run_dir: str | Path) -> Path:
+    return ensure_dir(Path(run_dir) / "tensorboard")
 
 
 def _write_yaml(path: str | Path, payload: dict) -> Path:
@@ -347,3 +352,105 @@ def latest_checkpoint(directory: str | Path) -> Path | None:
         return None
     checkpoints = sorted(directory.rglob("checkpoint*.pt"), key=lambda path: path.stat().st_mtime)
     return checkpoints[-1] if checkpoints else None
+
+
+def create_summary_writer(run_dir: str | Path, enabled: bool = True):
+    if not enabled:
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except Exception as exc:  # pragma: no cover - only hit in broken environments
+        print(f"[tensorboard] disabled: {exc}", flush=True)
+        return None
+    return SummaryWriter(log_dir=str(tensorboard_dir(run_dir)))
+
+
+def _is_numeric_scalar(value) -> bool:
+    return isinstance(value, (Number, np.integer, np.floating, np.bool_))
+
+
+def log_scalar_metrics(
+    writer,
+    namespace: str,
+    step: int,
+    metrics: dict,
+    exclude_keys: set[str] | None = None,
+) -> None:
+    if writer is None:
+        return
+    excluded = set(exclude_keys or set())
+    for key, value in metrics.items():
+        if key in excluded or not _is_numeric_scalar(value):
+            continue
+        scalar = float(value)
+        if not np.isfinite(scalar):
+            continue
+        writer.add_scalar(f"{namespace}/{key}", scalar, global_step=int(step))
+
+
+def _format_progress_value(value) -> str:
+    if isinstance(value, (bool, np.bool_)):
+        return str(int(value))
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.3f}"
+    return str(value)
+
+
+def print_progress_line(
+    prefix: str,
+    step_key: str,
+    step_value,
+    metrics: dict,
+    key_order: list[str] | None = None,
+) -> None:
+    parts = [str(prefix), f"{step_key}={_format_progress_value(step_value)}"]
+    keys = list(key_order or [])
+    if keys:
+        for key in keys:
+            if key in metrics and _is_numeric_scalar(metrics[key]):
+                parts.append(f"{key}={_format_progress_value(metrics[key])}")
+        print(" | ".join(parts), flush=True)
+        return
+    seen = {step_key}
+    for key in keys:
+        if key in metrics and _is_numeric_scalar(metrics[key]):
+            parts.append(f"{key}={_format_progress_value(metrics[key])}")
+            seen.add(key)
+    for key, value in metrics.items():
+        if key in seen or key.startswith("_") or key.endswith("_path"):
+            continue
+        if _is_numeric_scalar(value):
+            parts.append(f"{key}={_format_progress_value(value)}")
+    print(" | ".join(parts), flush=True)
+
+
+def build_metric_logger(
+    run_dir: str | Path,
+    namespace: str,
+    step_key: str,
+    tensorboard_enabled: bool = True,
+    console_interval: int = 1,
+    key_order: list[str] | None = None,
+) -> tuple[object | None, Callable[[dict], None]]:
+    writer = create_summary_writer(run_dir, enabled=tensorboard_enabled)
+    interval = max(int(console_interval), 1)
+    state = {"last_console_step": None}
+    excluded = {step_key, "checkpoint_path", "eval_media_dir"}
+
+    def log_record(record: dict) -> None:
+        if step_key not in record:
+            return
+        step_value = int(record[step_key])
+        log_scalar_metrics(writer, namespace, step_value, record, exclude_keys=excluded)
+        should_print = state["last_console_step"] is None
+        if not should_print and abs(step_value - int(state["last_console_step"])) >= interval:
+            should_print = True
+        if not should_print and any(key.startswith("eval_") for key in record):
+            should_print = True
+        if should_print:
+            print_progress_line(namespace, step_key, step_value, record, key_order=key_order)
+            state["last_console_step"] = step_value
+
+    return writer, log_record

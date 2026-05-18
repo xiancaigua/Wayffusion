@@ -9,6 +9,8 @@ param(
     [ValidateSet("gif", "mp4")][string]$RecordFormat = "gif",
     [int]$RecordFps = 8,
     [int]$RecordInterval = 4,
+    [int]$ConsoleLogInterval = 25,
+    [switch]$NoTensorboard,
     [switch]$ShowEval,
     [string]$PythonExe = ".\.venv\Scripts\python.exe"
 )
@@ -29,11 +31,19 @@ $command = @(
     "--total_updates", $TotalUpdates.ToString(),
     "--target_episodes", $TargetEpisodes.ToString(),
     "--eval_episodes", $EvalEpisodes.ToString(),
+    "--console_log_interval", $ConsoleLogInterval.ToString(),
     "--record_eval_episodes", $RecordEvalEpisodes.ToString(),
     "--record_format", $RecordFormat,
     "--record_fps", $RecordFps.ToString(),
     "--record_interval", $RecordInterval.ToString()
 )
+
+if ($NoTensorboard) {
+    $command += "--no-tensorboard"
+}
+else {
+    $command += "--tensorboard"
+}
 
 if ($ShowEval) {
     $command += "--no-headless"

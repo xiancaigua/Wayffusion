@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
+from typing import Callable
 
 import numpy as np
 import torch
@@ -8,6 +10,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from policies import observation_to_tensor
+from utils.profiling import get_memory_usage_mb
 
 
 class BCTrainer:
@@ -26,14 +29,22 @@ class BCTrainer:
             return loss.sum() / denom
         return loss.mean()
 
-    def train(self, dataset, output_dir: str | Path, eval_env=None) -> list[dict]:
+    def train(
+        self,
+        dataset,
+        output_dir: str | Path,
+        eval_env=None,
+        log_callback: Callable[[dict], None] | None = None,
+    ) -> list[dict]:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         checkpoints_dir = output_dir / "checkpoints"
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         loader = DataLoader(dataset, batch_size=int(self.train_config["batch_size"]), shuffle=True)
         history = []
+        train_start = time.perf_counter()
         for epoch in range(1, int(self.train_config["epochs"]) + 1):
+            epoch_start = time.perf_counter()
             losses = []
             for batch in loader:
                 obs = {
@@ -51,9 +62,17 @@ class BCTrainer:
                 nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
                 self.optimizer.step()
                 losses.append(float(loss.item()))
-            record = {"epoch": epoch, "bc_loss": float(np.mean(losses))}
+            record = {
+                "epoch": epoch,
+                "bc_loss": float(np.mean(losses)),
+                "epoch_time_sec": float(time.perf_counter() - epoch_start),
+                "wall_clock_time": float(time.perf_counter() - train_start),
+                "memory_usage_mb": get_memory_usage_mb(),
+            }
             checkpoint_path = checkpoints_dir / f"checkpoint_{epoch:04d}.pt"
             torch.save({"model_state_dict": self.policy.state_dict(), "train_config": self.train_config}, checkpoint_path)
             record["checkpoint_path"] = str(checkpoint_path)
             history.append(record)
+            if log_callback is not None:
+                log_callback(record)
         return history
