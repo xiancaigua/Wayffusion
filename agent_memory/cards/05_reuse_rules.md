@@ -24,6 +24,9 @@ Preconditions:
 - training-start snapshots must live under `snapshot/`
 - TensorBoard logs must live under `tensorboard/`
 - recordings must live under `media/` or `final_eval_media/`
+- the canonical zero-spatial-field ablation name is `no_spatial_field`; `task_id_only` is compatibility-only and should not be described as a pure task-id baseline
+- for PPO, `eval_reward` and `eval_success_rate` should be interpreted as overall summaries; per-task health lives in fields like `eval_goal_nav_*`, `eval_coverage_*`, and final `eval_metrics.csv` per-task rows
+- for variable-`N` PPO, monitor per-`N` keys such as `eval_N4_*`, `eval_N8_*`, ...; the plain `eval_reward` alias is only the cross-`N` overall mean
 
 ## Config layer
 
@@ -33,6 +36,8 @@ Preconditions:
 - `configs/env/multitask.yaml`
 - `configs/policy/ppo_cnn_deepsets.yaml`
 - `configs/policy/ppo_cnn_deepsets_multitask_20k.yaml`
+- `docs/config_reference_zh.md`
+- `configs/examples/`
 
 ### Drift to watch
 
@@ -43,6 +48,7 @@ Rule:
 
 - new docs and new scripts should prefer one primary naming scheme
 - if aliases remain, they should be marked as legacy or compatibility entries
+- new experiments should prefer cloning from `configs/examples/` before editing task- or paper-specific run configs in place
 
 ## Results layer
 

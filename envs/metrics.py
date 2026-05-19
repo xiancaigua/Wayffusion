@@ -58,6 +58,7 @@ def compute_reference_normalization(
     return {
         "normalized_score": clipped_score,
         "normalized_score_raw": raw_score,
+        "raw_return": return_value,
         "reference_random_return": random_return,
         "reference_heuristic_return": heuristic_return,
         "reference_lower_return": lower_return,
@@ -66,6 +67,7 @@ def compute_reference_normalization(
         "reference_best_method": best_method,
         "reference_worst_method": worst_method,
         "reference_order_flipped": float(best_method != "heuristic"),
+        "reference_unstable": float(reference_gap < 1e-3),
     }
 
 
@@ -100,5 +102,5 @@ def summarize_episode_metrics(records: Iterable[dict]) -> dict:
         if isinstance(values[0], (int, float, np.floating)):
             summary[key] = float(np.mean(values))
         else:
-            summary[key] = values[-1]
+            summary[key] = values[0] if all(value == values[0] for value in values[1:]) else "mixed"
     return summary

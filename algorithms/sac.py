@@ -199,6 +199,8 @@ class SACTrainer:
         self,
         output_dir: str | Path,
         eval_env=None,
+        eval_task_names: list[str] | None = None,
+        eval_base_env_config: dict | None = None,
         eval_episodes: int = 5,
         headless: bool = True,
         record_eval_episodes: int = 0,
@@ -236,18 +238,39 @@ class SACTrainer:
                 if int(record_eval_episodes) > 0 and eval_count % record_interval == 0:
                     media_dir = output_dir / "media" / f"step_{self.total_steps:08d}"
                     media_episodes = int(record_eval_episodes)
-                record.update(
-                    self.evaluate(
-                        eval_env,
-                        episodes=eval_episodes,
+                if eval_task_names and eval_base_env_config is not None:
+                    from utils import evaluate_policy_per_task, flatten_task_eval_summaries
+
+                    _, task_summaries, overall_summary = evaluate_policy_per_task(
+                        eval_base_env_config,
+                        self.actor,
+                        eval_task_names,
+                        eval_episodes,
+                        self.device,
                         headless=headless,
                         record_dir=media_dir,
                         record_episodes=media_episodes,
                         record_format=record_format,
                         record_fps=record_fps,
                         record_prefix=f"step_{self.total_steps:08d}",
+                        normalize_with_reference=False,
                     )
-                )
+                    record.update(flatten_task_eval_summaries(task_summaries, overall_summary, prefix="eval"))
+                    if media_dir is not None and media_episodes > 0:
+                        record["eval_media_dir"] = str(media_dir)
+                else:
+                    record.update(
+                        self.evaluate(
+                            eval_env,
+                            episodes=eval_episodes,
+                            headless=headless,
+                            record_dir=media_dir,
+                            record_episodes=media_episodes,
+                            record_format=record_format,
+                            record_fps=record_fps,
+                            record_prefix=f"step_{self.total_steps:08d}",
+                        )
+                    )
                 checkpoint_path = checkpoints_dir / f"checkpoint_{self.total_steps:08d}.pt"
                 torch.save({"model_state_dict": self.actor.state_dict(), "train_config": self.train_config}, checkpoint_path)
                 record["checkpoint_path"] = str(checkpoint_path)

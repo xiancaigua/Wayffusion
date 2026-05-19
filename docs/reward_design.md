@@ -49,7 +49,7 @@ Intent:
 ```text
 R_form = w_error * formation_error_reduction
        + w_angle * angular_coverage_uniformity
-       + w_radius * signed_radius_error
+       - w_radius_penalty * radius_error
        + w_stability * short_horizon_stability
 ```
 

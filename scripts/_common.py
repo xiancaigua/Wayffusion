@@ -7,6 +7,7 @@ from numbers import Number
 from pathlib import Path
 import sys
 from typing import Callable, Iterable
+import warnings
 
 import numpy as np
 import yaml
@@ -188,6 +189,7 @@ def collect_baseline_episode_records(env_config: dict, method: str, episodes: in
             "scaling_mode": str(info.get("scaling_mode", env_config.get("scaling_mode", "fixed_map"))),
             "seed": int(env_config.get("seed", 0)) + episode_idx,
             "return": float(total_reward),
+            "raw_return": float(total_reward),
             "success_rate": float(info.get("success", False)),
             "collision_rate": float(info.get("collision_rate", 0.0)),
             "path_length": float(info.get("path_length", 0.0)),
@@ -330,7 +332,14 @@ def observation_override_from_variant(obs_variant: str | None) -> dict:
         "drop_channels": [],
     }
     if variant == "task_id_only":
-        override["observation_mode"] = "task_id_only"
+        warnings.warn(
+            "'task_id_only' is a deprecated alias; use 'no_spatial_field' instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
+        override["observation_mode"] = "no_spatial_field"
+    elif variant == "no_spatial_field":
+        override["observation_mode"] = "no_spatial_field"
     elif variant == "single_channel_field":
         override["observation_mode"] = "single_channel_field"
     elif variant in {"multi_channel_field", "multi_channel_field+task_id"}:

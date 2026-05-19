@@ -1,5 +1,6 @@
-name: bc_sac
-algorithm: sac
+# TD3 模范配置
+name: td3_cnn_deepsets_template
+algorithm: td3
 policy_class: cnn_deepsets
 cnn_channels: [16, 32, 64]
 agent_hidden_dim: 64
@@ -14,4 +15,5 @@ gamma: 0.99
 tau: 0.005
 learning_rate: 0.0003
 policy_delay: 2
-target_entropy_scale: 1.0
+policy_noise: 0.2
+noise_clip: 0.5

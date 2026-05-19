@@ -3,7 +3,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 from torch import nn
-from torch.distributions import Normal
+
+from policies.action_distribution import SquashedNormal
 
 
 class MLPPolicy(nn.Module):
@@ -36,23 +37,25 @@ class MLPPolicy(nn.Module):
     def forward(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         x = self._flatten_obs(obs)
         features = self.backbone(x)
-        mean = torch.tanh(self.actor(features)).view(features.shape[0], *self.action_shape)
+        mean = self.actor(features).view(features.shape[0], *self.action_shape)
         value = self.critic(features).squeeze(-1)
         return mean, value
 
     def get_action_and_value(self, obs: dict[str, torch.Tensor], action: torch.Tensor | None = None):
         mean, value = self(obs)
         std = self.log_std.exp().view(1, *self.action_shape).expand_as(mean)
-        dist = Normal(mean, std)
+        dist = SquashedNormal(mean, std)
         if action is None:
-            action = dist.sample()
-        if action.ndim == 2:
-            action = action.view(mean.shape[0], *self.action_shape)
-        clipped_action = torch.clamp(action, -1.0, 1.0)
-        log_prob = dist.log_prob(clipped_action).sum(dim=(-1, -2))
-        entropy = dist.entropy().sum(dim=(-1, -2))
-        return clipped_action, log_prob, entropy, value
+            bounded_action, raw_action = dist.rsample(return_raw=True)
+        else:
+            if action.ndim == 2:
+                action = action.view(mean.shape[0], *self.action_shape)
+            bounded_action = torch.clamp(action, -1.0, 1.0)
+            raw_action = dist.atanh(bounded_action)
+        log_prob = dist.log_prob(bounded_action, raw_action=raw_action, reduce=True)
+        entropy = dist.entropy_estimate(bounded_action, raw_action=raw_action, reduce=True)
+        return bounded_action, log_prob, entropy, value
 
     def act_deterministic(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         mean, _ = self(obs)
-        return torch.clamp(mean, -1.0, 1.0)
+        return SquashedNormal(mean, self.log_std.exp().view(1, *self.action_shape).expand_as(mean)).deterministic()

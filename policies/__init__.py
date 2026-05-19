@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from policies.attention_policy import CNNAttentionPolicy
+from policies.action_distribution import SquashedNormal
 from policies.cnn_deepsets_policy import CNNDeepSetsPolicy
 from policies.mlp_policy import MLPPolicy
 
@@ -46,6 +47,7 @@ __all__ = [
     "MLPPolicy",
     "CNNDeepSetsPolicy",
     "CNNAttentionPolicy",
+    "SquashedNormal",
     "build_policy",
     "observation_to_tensor",
 ]

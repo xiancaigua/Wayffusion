@@ -74,6 +74,26 @@ The score can therefore be:
 
 If the heuristic is actually weaker than random on a difficult slice, `reference_order_flipped = 1` marks that the random baseline became the stronger anchor for that task/scale pair.
 
+The detailed record now also keeps:
+
+- `normalized_score_raw`
+- `reference_random_return`
+- `reference_heuristic_return`
+- `reference_gap`
+- `reference_best_method`
+- `reference_order_flipped`
+- `reference_unstable`
+- `raw_return`
+- `intrinsic_score`
+- `success_rate`
+- `collision_rate`
+
+Interpretation rule:
+
+- `normalized_score` is only a relative score against the random and heuristic anchors
+- if `reference_gap` is tiny or `reference_order_flipped = 1`, do not treat `normalized_score` alone as an absolute capability metric
+- report reading should always include raw return, intrinsic score, success rate, collision rate, and reference gap together
+
 ## Metric calibration notes
 
 For cross-`N` comparisons, the benchmark now reports:

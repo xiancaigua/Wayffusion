@@ -112,6 +112,22 @@ Rule:
 
 - every code, config, doc, CLI, or output-contract change must update `agent_memory/` in the same task
 
+## Theme J: Core credibility repair for scaling, policy math, and ablation semantics
+
+Implemented:
+
+- `waypoint_controller(...)` now clips against `map_size`, not a hard-coded unit square
+- `density_preserving` runs can now move into coordinates larger than `1.0`
+- `MLP`, `CNN + DeepSets`, and `Attention` policies now use tanh-squashed Gaussian action sampling with corrected log-prob evaluation
+- formation radius mismatch is now represented as a positive error with an explicit negative penalty term
+- canonical ablation naming is now `no_spatial_field`, while `task_id_only` remains a deprecated alias
+- reference normalization now marks unstable anchors and preserves raw-return / anchor metadata more explicitly
+
+Reason:
+
+- these were benchmark-trust issues, not cosmetic cleanups
+- cross-`N` evaluation and policy-gradient math are now aligned with the intended centralized benchmark contract
+
 ## Trusted conclusion
 
 These changes are no longer isolated patches. They now exist consistently in:
@@ -123,3 +139,46 @@ These changes are no longer isolated patches. They now exist consistently in:
 - operational memory
 
 That combination should be treated as the current engineering source of truth.
+
+## Theme K: Chinese config reference and template config directory
+
+Implemented:
+
+- `docs/config_reference_zh.md` was refreshed into a script-oriented Chinese config guide
+- `configs/examples/` now contains ready-to-copy template files for env, policy, and eval categories
+- a lightweight parser test now guards the template directory against drift
+
+Reason:
+
+- users now have a single Chinese entrypoint for understanding config categories
+- new experiments can start from stable templates instead of mutating old run configs blindly
+
+## Theme L: PPO evaluation now runs per-task instead of only mixed-sampler averages
+
+Implemented:
+
+- `utils/evaluation.py` now provides a fixed-task `evaluate_policy_per_task(...)` helper
+- PPO periodic evaluation now records per-task metrics plus an overall summary
+- PPO final evaluation now writes per-task rows and an `overall` row into `eval_metrics.csv`
+- TensorBoard final-eval namespaces now include per-task paths such as `ppo/final_eval/N4/goal_nav/...`
+
+Reason:
+
+- a multi-task training run should not hide a collapsed task behind one mixed average
+- per-task regressions are now visible during training and in saved evaluation tables
+
+## Theme M: Per-task evaluation propagated to eval scripts and off-policy trainers
+
+Implemented:
+
+- `scripts/evaluate_policy.py` now writes per-task rows plus an `overall` row
+- `scripts/evaluate_scaling.py` now writes per-task rows plus an `overall` row for every evaluated `N`
+- `SAC` and `TD3` periodic evaluation now flatten per-task metrics into training records
+- `SAC` and `TD3` final eval now mirror PPO with per-task TensorBoard namespaces and per-task `eval_metrics.csv`
+- variable-`N` PPO periodic evaluation now monitors all requested `N`, not just the first one
+- restored minimal default configs for `configs/policy/sac_cnn_deepsets.yaml` and `configs/policy/td3_cnn_deepsets.yaml` so the touched training scripts keep a valid default entrypoint
+
+Reason:
+
+- trust-worthy evaluation should expose both task-level failures and cross-`N` failures
+- fixed-task breakdowns are now consistent across online training logs, eval scripts, and saved CSV outputs

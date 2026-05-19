@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict
+import warnings
 
 import numpy as np
 
@@ -40,6 +41,13 @@ def adapt_task_field(field: np.ndarray, mode: str, weights: list[float] | None =
     if mode == "multi_channel":
         return task_field
     if mode == "task_id_only":
+        warnings.warn(
+            "'task_id_only' is a deprecated alias; use 'no_spatial_field' instead.",
+            FutureWarning,
+            stacklevel=2,
+        )
+        return np.zeros_like(task_field, dtype=np.float32)
+    if mode == "no_spatial_field":
         return np.zeros_like(task_field, dtype=np.float32)
     if mode == "single_channel":
         if weights is None:

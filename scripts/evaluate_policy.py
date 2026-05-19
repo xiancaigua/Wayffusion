@@ -13,7 +13,6 @@ if str(ROOT) not in sys.path:
 from policies import build_policy
 from scripts._common import (
     baseline_reference_episodes_for_agent_count,
-    baseline_reference_table,
     ensure_dir,
     format_agent_set_name,
     format_obs_variant_name,
@@ -24,7 +23,7 @@ from scripts._common import (
     prepare_env_config,
     write_metrics_csv,
 )
-from utils import aggregate_episode_records, apply_reference_normalization, evaluate_policy_episodes
+from utils import evaluate_policy_per_task
 
 
 def main():
@@ -70,27 +69,48 @@ def main():
             scaling_mode=args.scaling_mode,
             observation_override=observation_override_from_variant(args.obs_variant),
         )
-        eval_env = CentralizedMultiUAVEnv(eval_env_config)
-        episode_records = evaluate_policy_episodes(eval_env, policy, args.episodes, device)
-        reference_table = baseline_reference_table(
+        _, task_summaries, overall_summary = evaluate_policy_per_task(
             eval_env_config,
-            episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.episodes // 2)),
+            policy,
+            task_names,
+            args.episodes,
+            device,
+            normalize_with_reference=True,
+            reference_episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.episodes // 2)),
         )
-        normalized_records = [apply_reference_normalization(record, reference_table) for record in episode_records]
-        summary = aggregate_episode_records(normalized_records)
+        for task_name, task_summary in task_summaries.items():
+            records.append(
+                {
+                    **task_summary,
+                    "method": Path(args.checkpoint).stem,
+                    "algorithm": policy_config.get("algorithm", "policy"),
+                    "architecture": policy_config["policy_class"],
+                    "observation_mode": eval_env_config.get("observation_mode", "multi_channel_field"),
+                    "obs_variant": args.obs_variant,
+                    "task_set": format_task_set_name(task_names),
+                    "task_name": task_name,
+                    "eval_group": "per_task",
+                    "num_agents": agent_count,
+                    "scaling_mode": args.scaling_mode,
+                    "seed": int(eval_env_config.get("seed", 0)),
+                    "normalized_score": float(task_summary.get("normalized_score_mean", 0.0)),
+                }
+            )
         records.append(
             {
+                **overall_summary,
                 "method": Path(args.checkpoint).stem,
                 "algorithm": policy_config.get("algorithm", "policy"),
                 "architecture": policy_config["policy_class"],
                 "observation_mode": eval_env_config.get("observation_mode", "multi_channel_field"),
+                "obs_variant": args.obs_variant,
                 "task_set": format_task_set_name(task_names),
-                "task_name": "multitask" if len(task_names) > 1 else task_names[0],
+                "task_name": "overall",
+                "eval_group": "overall",
                 "num_agents": agent_count,
                 "scaling_mode": args.scaling_mode,
                 "seed": int(eval_env_config.get("seed", 0)),
-                "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
-                **summary,
+                "normalized_score": float(overall_summary.get("normalized_score_mean", 0.0)),
             }
         )
     output_path = output_dir / f"{format_task_set_name(task_names)}_N{format_agent_set_name(agent_counts)}_{format_obs_variant_name(args.obs_variant)}.csv"

@@ -21,13 +21,17 @@ This stage hardens the benchmark from a rollout sanity benchmark into a learning
 
 All learning baselines use the same environment API and the same shared observation/action structure. Observation ablations are implemented through adapters rather than task-specific environment variants:
 
-- `task_id_only`
+- `no_spatial_field`
 - `single_channel_field`
 - `multi_channel_field`
 - `multi_channel_field + task_id`
 - `multi_channel_field + agent_density_map`
 - `multi_channel_field without risk channel`
 - `multi_channel_field without desired_occupancy channel`
+
+Backward compatibility:
+
+- `task_id_only` remains accepted as a deprecated alias for `no_spatial_field`
 
 All training and evaluation scripts expose these through `--obs_variant`, which makes representation ablations easy to reproduce without maintaining separate environment files.
 

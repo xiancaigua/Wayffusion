@@ -33,10 +33,21 @@ If you prefer to avoid activation, every command below also works as:
 - `policies/`: `MLP`, `CNN + DeepSets`, and `CNN + Attention` policies
 - `algorithms/`: PPO, SAC, TD3, and BC trainers
 - `agent_memory/`: durable audit memories, trust judgments, and a lightweight loader for future agents
+- `configs/examples/`: ready-to-copy template configs for env, policy, and eval categories
 - `scripts/check/`: smoke-check rollouts, live visualization, and reward diagnostics
 - `scripts/`: dataset generation, training, evaluation, and scaling experiments
-- `docs/`: benchmark spec, learning baselines, scaling, reward normalization, and evaluation protocol
+- `docs/`: benchmark spec, learning baselines, scaling, reward normalization, evaluation protocol, and Chinese config reference
 - `tests/`: smoke tests for env, fields, and baselines
+
+## Config reference
+
+The main Chinese config guide lives at `docs/config_reference_zh.md`.
+
+If you want a clean starting point instead of editing an existing experiment file directly, start from:
+
+- `configs/examples/env_template.yaml`
+- `configs/examples/policy_*_template.yaml`
+- `configs/examples/eval_*_template.yaml`
 
 ## Quick start
 
@@ -90,6 +101,8 @@ Training command convention:
 - use `--record_eval_episodes <K>` to save the first `K` eval episodes each eval pass, plus `--record_format gif|mp4`, `--record_fps`, and `--record_interval` to control periodic media capture
 - TensorBoard is enabled by default on all training scripts; event files are written to `outputs/training/.../tensorboard/`
 - use `--console_log_interval` to control live stdout feedback on the trainer's native progress axis: PPO updates, SAC/TD3 environment steps, BC epochs
+- PPO, SAC, and TD3 periodic and final evaluation now run per task over the explicit `--tasks` list; `eval_reward` / `eval_success_rate` map to the overall summary, while per-task fields such as `eval_goal_nav_return` and `eval_coverage_success_rate` are written to `training_metrics.csv`, TensorBoard, and final eval outputs
+- variable-`N` PPO periodic evaluation now monitors every requested `N`; expect fields such as `eval_N4_goal_nav_return`, `eval_N8_overall_success_rate`, and cross-`N` compatibility aliases like `eval_reward`
 
 Train BC:
 
@@ -100,7 +113,7 @@ Train BC:
 Switch observation variants for ablations with:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 20 --scaling_mode density_preserving --obs_variant task_id_only
+.\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 20 --scaling_mode density_preserving --obs_variant no_spatial_field
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 20 --scaling_mode density_preserving --obs_variant single_channel_field
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 20 --scaling_mode density_preserving --obs_variant multi_channel_field+task_id
 ```
@@ -184,6 +197,8 @@ pytest tests/
 - `outputs/training/.../media/`: periodic training-eval GIF/MP4 captures when `--record_eval_episodes` is enabled
 - `outputs/training/.../final_eval_media/`: final evaluation GIF/MP4 captures for BC / PPO / SAC / TD3 runs when recording is enabled
 - `outputs/eval/...`: policy, scaling, and algorithm-comparison tables
+- `outputs/training/.../eval_metrics.csv` from PPO / SAC / TD3 now contains one row per task plus one `task_name=overall` row for each evaluated `num_agents`
+- `scripts/evaluate_policy.py` and `scripts/evaluate_scaling.py` now also emit per-task rows plus one `overall` row for each evaluated `num_agents`
 
 ## Normalized score
 
@@ -196,6 +211,8 @@ normalized_score = (R - R_random) / (R_heuristic - R_random + eps)
 where `R_random` and `R_heuristic` are measured on the same task set, scaling mode, and swarm size. For multi-task evaluation, the benchmark now computes these references per task family first and then averages over the sampled episode tasks. If the heuristic underperforms random on a hard slice, the two anchors are sorted before normalization and `reference_order_flipped` marks that case in detailed records.
 
 For report stability, the stored `normalized_score` is clipped to `[-5, 5]`, while the raw ratio remains available internally as `normalized_score_raw`.
+
+This score is still only relative to the two anchors. When `reference_gap` is tiny or `reference_order_flipped = 1`, do not interpret `normalized_score` alone as an absolute capability metric; inspect raw return, intrinsic score, success rate, collision rate, and reference gap together.
 
 For large-scale comparisons, note that:
 

@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from copy import deepcopy
+
+import numpy as np
+
+from envs import CentralizedMultiUAVEnv
+from envs.rewards import common_reward
+from scripts._common import load_env_config
+
+
+def test_common_penalties_are_non_positive():
+    config = load_env_config("configs/env/multitask.yaml")
+    reward, components = common_reward(
+        config,
+        {
+            "pair_collision_count": 2,
+            "obstacle_collision_count": 1,
+            "path_length_delta": 0.4,
+            "step_safety_violations": 1,
+            "step_risk_exposure": 0.6,
+            "num_agents": 4,
+            "spatial_scale": 1.0,
+            "max_step_distance": 0.1,
+        },
+    )
+    assert reward <= 0.0
+    assert components["collision_penalty"] <= 0.0
+    assert components["path_penalty"] <= 0.0
+
+
+def test_goal_nav_progress_reward_is_positive_when_agents_move_closer():
+    env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "goal_nav", "num_agents": 2}))
+    env.reset(seed=5)
+    task = env.current_task
+    task_state = deepcopy(env.current_task_state)
+    prev_state = env._snapshot_state()
+    env_state = env._snapshot_state()
+    goal = task_state["goals"][0]
+    direction = goal - env_state["positions"][0]
+    direction = direction / max(np.linalg.norm(direction), 1e-6)
+    env_state["positions"][0] = env_state["positions"][0] + 0.02 * direction
+
+    result = task.compute_reward(
+        task_state,
+        prev_state,
+        env_state,
+        {
+            "pair_collision_count": 0,
+            "obstacle_collision_count": 0,
+            "path_length_delta": 0.0,
+            "step_risk_exposure": 0.0,
+            "step_safety_violations": 0,
+            "num_agents": env.num_agents,
+            "spatial_scale": env.runtime_params["spatial_scale"],
+            "max_step_distance": env.runtime_params["max_speed"] * float(env.config["dt"]),
+        },
+    )
+    assert result.components["task_progress_reward"] > 0.0
+
+
+def test_coverage_new_coverage_component_is_positive():
+    env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "coverage"}))
+    env.reset(seed=3)
+    task = env.current_task
+    task_state = deepcopy(env.current_task_state)
+    prev_state = env._snapshot_state()
+    env_state = env._snapshot_state()
+    env_state["visit_count_map"] = task_state["coverage_demand"].copy()
+    env_state["step_coverage_mask"] = task_state["coverage_demand"].copy()
+    result = task.compute_reward(
+        task_state,
+        prev_state,
+        env_state,
+        {
+            "pair_collision_count": 0,
+            "obstacle_collision_count": 0,
+            "path_length_delta": 0.0,
+            "step_risk_exposure": 0.0,
+            "step_safety_violations": 0,
+            "num_agents": env.num_agents,
+            "spatial_scale": env.runtime_params["spatial_scale"],
+            "max_step_distance": env.runtime_params["max_speed"] * float(env.config["dt"]),
+        },
+    )
+    assert result.components["coverage_reward"] > 0.0
+
+
+def test_risk_nav_high_exposure_produces_negative_task_penalty():
+    env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "risk_nav"}))
+    env.reset(seed=7)
+    task = env.current_task
+    task_state = deepcopy(env.current_task_state)
+    prev_state = env._snapshot_state()
+    env_state = env._snapshot_state()
+    result = task.compute_reward(
+        task_state,
+        prev_state,
+        env_state,
+        {
+            "pair_collision_count": 0,
+            "obstacle_collision_count": 0,
+            "path_length_delta": 0.0,
+            "step_risk_exposure": 5.0,
+            "step_safety_violations": 0,
+            "num_agents": env.num_agents,
+            "spatial_scale": env.runtime_params["spatial_scale"],
+            "max_step_distance": env.runtime_params["max_speed"] * float(env.config["dt"]),
+        },
+    )
+    assert result.components["risk_task_penalty"] < 0.0

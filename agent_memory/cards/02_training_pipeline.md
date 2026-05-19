@@ -55,6 +55,31 @@ All four training entrypoints now share the same live feedback contract:
 - SAC / TD3 log on the environment-step axis
 - BC logs on the epoch axis
 
+## PPO evaluation contract
+
+`scripts/train_ppo.py` no longer treats multi-task evaluation as one mixed sampler average.
+
+Current behavior:
+
+- training can still sample tasks randomly when `task_names` has multiple entries
+- periodic PPO evaluation now runs a fixed-task eval pass for every task listed in `--tasks`
+- `eval_reward` and `eval_success_rate` are compatibility aliases for the overall multi-task summary
+- per-task fields such as `eval_goal_nav_return`, `eval_coverage_success_rate`, and `eval_overall_return` are written into `training_metrics.csv` and TensorBoard
+- final PPO eval writes one row per task plus one `task_name=overall` row for every evaluated `num_agents`
+
+The same per-task contract now also applies to:
+
+- `scripts/evaluate_policy.py`
+- `scripts/evaluate_scaling.py`
+- `SAC` periodic and final evaluation
+- `TD3` periodic and final evaluation
+
+For variable-`N` PPO training:
+
+- periodic evaluation now monitors every requested `N`
+- per-`N` metrics are flattened into keys such as `eval_N4_goal_nav_return`
+- legacy aliases such as `eval_reward` map to the mean overall score across monitored `N`
+
 ## Output directory contract
 
 All training outputs are rooted at:

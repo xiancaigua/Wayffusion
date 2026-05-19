@@ -15,7 +15,6 @@ from baselines import make_baseline
 from policies import build_policy
 from scripts._common import (
     baseline_reference_episodes_for_agent_count,
-    baseline_reference_table,
     collect_baseline_episode_records,
     ensure_dir,
     format_agent_set_name,
@@ -27,17 +26,49 @@ from scripts._common import (
     prepare_env_config,
     write_metrics_csv,
 )
-from utils import aggregate_episode_records, apply_reference_normalization, evaluate_policy_episodes
+from utils import evaluate_policy_per_task
 
 
 def evaluate_baseline(method: str, env_config: dict, episodes: int) -> dict:
+    from utils import aggregate_episode_records, apply_reference_normalization
+
     records = collect_baseline_episode_records(env_config, method, episodes)
+    from scripts._common import baseline_reference_table
+
     reference_table = baseline_reference_table(
         env_config,
         episodes=baseline_reference_episodes_for_agent_count(int(env_config["num_agents"]), episodes),
     )
     normalized_records = [apply_reference_normalization(record, reference_table) for record in records]
     return aggregate_episode_records(normalized_records)
+
+
+def evaluate_baseline_per_task(method: str, base_env_config: dict, task_names: list[str], episodes: int) -> tuple[list[dict], dict[str, dict], dict]:
+    from scripts._common import baseline_reference_table
+    from utils import aggregate_episode_records, apply_reference_normalization, make_fixed_task_eval_config
+
+    all_records: list[dict] = []
+    task_summaries: dict[str, dict] = {}
+    for task_name in task_names:
+        eval_config = make_fixed_task_eval_config(base_env_config, task_name)
+        records = collect_baseline_episode_records(eval_config, method, episodes)
+        reference_table = baseline_reference_table(
+            eval_config,
+            episodes=baseline_reference_episodes_for_agent_count(int(eval_config["num_agents"]), episodes),
+        )
+        normalized_records = [apply_reference_normalization(record, reference_table) for record in records]
+        for record in normalized_records:
+            record["task_name"] = task_name
+            record["eval_group"] = task_name
+        summary = aggregate_episode_records(normalized_records)
+        summary["task_name"] = task_name
+        summary["eval_group"] = task_name
+        task_summaries[task_name] = summary
+        all_records.extend(normalized_records)
+    overall_summary = aggregate_episode_records(all_records)
+    overall_summary["task_name"] = "overall"
+    overall_summary["eval_group"] = "overall"
+    return all_records, task_summaries, overall_summary
 
 
 def load_policy_for_counts(
@@ -92,7 +123,6 @@ def main():
     policy = None
     policy_config = None
     device = None
-    reference_cache: dict[tuple[int, str], dict[str, float]] = {}
     if args.checkpoint:
         policy, policy_config, device = load_policy_for_counts(
             checkpoint_path=args.checkpoint,
@@ -104,6 +134,7 @@ def main():
             observation_override=observation_override_from_variant(args.obs_variant),
         )
 
+    overall_rows = []
     for agent_count in agent_counts:
         env_config = prepare_env_config(
             args.env_config,
@@ -113,39 +144,67 @@ def main():
             observation_override=observation_override_from_variant(args.obs_variant),
         )
         if args.checkpoint:
-            from envs import CentralizedMultiUAVEnv
-
-            eval_env = CentralizedMultiUAVEnv(env_config)
-            episode_records = evaluate_policy_episodes(eval_env, policy, args.episodes, device)
-            summary = aggregate_episode_records(episode_records)
             method_name = args.method
             algorithm = policy_config.get("algorithm", args.method)
             architecture = policy_config["policy_class"]
+            _, task_summaries, overall_summary = evaluate_policy_per_task(
+                env_config,
+                policy,
+                task_names,
+                args.episodes,
+                device,
+                normalize_with_reference=True,
+                reference_episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.episodes // 2)),
+            )
         else:
-            summary = evaluate_baseline(args.method, env_config, args.episodes)
             method_name = args.method
             algorithm = args.method
             architecture = "heuristic" if args.method == "heuristic" else "baseline"
-        records.append(
+            _, task_summaries, overall_summary = evaluate_baseline_per_task(args.method, env_config, task_names, args.episodes)
+        for task_name, task_summary in task_summaries.items():
+            records.append(
+                {
+                    **task_summary,
+                    "method": method_name,
+                    "algorithm": algorithm,
+                    "architecture": architecture,
+                    "observation_mode": env_config.get("observation_mode", "multi_channel_field"),
+                    "obs_variant": args.obs_variant,
+                    "task_set": format_task_set_name(task_names),
+                    "task_name": task_name,
+                    "eval_group": "per_task",
+                    "num_agents": agent_count,
+                    "scaling_mode": args.scaling_mode,
+                    "protocol": args.protocol,
+                    "train_agent_set": format_agent_set_name(train_agent_counts),
+                    "seed": int(env_config.get("seed", 0)),
+                    "normalized_score": float(task_summary.get("normalized_score_mean", 0.0)),
+                }
+            )
+        overall_row = (
             {
+                **overall_summary,
                 "method": method_name,
                 "algorithm": algorithm,
                 "architecture": architecture,
                 "observation_mode": env_config.get("observation_mode", "multi_channel_field"),
+                "obs_variant": args.obs_variant,
                 "task_set": format_task_set_name(task_names),
-                "task_name": "multitask" if len(task_names) > 1 else task_names[0],
+                "task_name": "overall",
+                "eval_group": "overall",
                 "num_agents": agent_count,
                 "scaling_mode": args.scaling_mode,
                 "protocol": args.protocol,
                 "train_agent_set": format_agent_set_name(train_agent_counts),
                 "seed": int(env_config.get("seed", 0)),
-                "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
-                **summary,
+                "normalized_score": float(overall_summary.get("normalized_score_mean", 0.0)),
             }
         )
+        records.append(overall_row)
+        overall_rows.append(overall_row)
 
-    if records:
-        normalized_values = [float(record["normalized_score"]) for record in records]
+    if overall_rows:
+        normalized_values = [float(record["normalized_score"]) for record in overall_rows]
         average_normalized_score = float(np.mean(normalized_values))
         worst_task_score = float(np.min(normalized_values))
         for record in records:

@@ -16,8 +16,9 @@ def waypoint_controller(
     kp: float,
     max_speed: float,
     dt: float,
+    map_size: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     error = np.asarray(waypoints, dtype=np.float32) - np.asarray(positions, dtype=np.float32)
     velocities = clip_norm(kp * error, max_speed)
-    next_positions = np.clip(np.asarray(positions, dtype=np.float32) + dt * velocities, 0.0, 1.0)
+    next_positions = np.clip(np.asarray(positions, dtype=np.float32) + dt * velocities, 0.0, float(map_size))
     return next_positions.astype(np.float32), velocities.astype(np.float32)

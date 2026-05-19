@@ -93,7 +93,7 @@ reward_weights:
   formation:
     error_reduction: 2.0
     angular_coverage: 0.9
-    radius_error: -0.8
+    radius_error_penalty: 0.8
     stability: 0.4
   risk_nav:
     progress: 1.0

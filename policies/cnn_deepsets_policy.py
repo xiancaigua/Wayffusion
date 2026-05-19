@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torch.distributions import Normal
+
+from policies.action_distribution import SquashedNormal
 
 
 def masked_mean(values: torch.Tensor, mask: torch.Tensor | None, dim: int) -> torch.Tensor:
@@ -80,7 +81,7 @@ class CNNDeepSetsPolicy(nn.Module):
         expanded_task = task_feat.unsqueeze(1).expand(batch_size, num_agents, -1)
         expanded_global = global_feat.unsqueeze(1).expand(batch_size, num_agents, -1)
         decoder_input = torch.cat([agent_tokens, expanded_state, expanded_task, expanded_global], dim=-1)
-        mean = torch.tanh(self.decoder(decoder_input))
+        mean = self.decoder(decoder_input)
         if agent_mask is not None:
             mean = mean * agent_mask.unsqueeze(-1).float()
         value = self.value_head(state_feat).squeeze(-1)
@@ -89,24 +90,30 @@ class CNNDeepSetsPolicy(nn.Module):
     def get_action_and_value(self, obs: dict[str, torch.Tensor], action: torch.Tensor | None = None):
         mean, value = self(obs)
         std = self.log_std.exp().view(1, 1, 2).expand_as(mean)
-        dist = Normal(mean, std)
+        dist = SquashedNormal(mean, std)
         if action is None:
-            action = dist.rsample()
-        if action.ndim == 2:
-            action = action.view(mean.shape[0], mean.shape[1], 2)
-        clipped_action = torch.clamp(action, -1.0, 1.0)
-        log_prob = dist.log_prob(clipped_action).sum(dim=-1)
-        entropy = dist.entropy().sum(dim=-1)
+            bounded_action, raw_action = dist.rsample(return_raw=True)
+        else:
+            if action.ndim == 2:
+                action = action.view(mean.shape[0], mean.shape[1], 2)
+            bounded_action = torch.clamp(action, -1.0, 1.0)
+            raw_action = dist.atanh(bounded_action)
+        log_prob = dist.log_prob(bounded_action, raw_action=raw_action, reduce=False).sum(dim=-1)
+        entropy = dist.entropy_estimate(bounded_action, raw_action=raw_action, reduce=False).sum(dim=-1)
         agent_mask = self._agent_mask(obs)
         if agent_mask is not None:
             log_prob = (log_prob * agent_mask.float()).sum(dim=-1)
             entropy = (entropy * agent_mask.float()).sum(dim=-1)
-            clipped_action = clipped_action * agent_mask.unsqueeze(-1).float()
+            bounded_action = bounded_action * agent_mask.unsqueeze(-1).float()
         else:
             log_prob = log_prob.sum(dim=-1)
             entropy = entropy.sum(dim=-1)
-        return clipped_action, log_prob, entropy, value
+        return bounded_action, log_prob, entropy, value
 
     def act_deterministic(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         mean, _ = self(obs)
-        return torch.clamp(mean, -1.0, 1.0)
+        action = SquashedNormal(mean, self.log_std.exp().view(1, 1, 2).expand_as(mean)).deterministic()
+        agent_mask = self._agent_mask(obs)
+        if agent_mask is not None:
+            action = action * agent_mask.unsqueeze(-1).float()
+        return action

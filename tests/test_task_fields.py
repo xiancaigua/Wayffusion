@@ -1,7 +1,47 @@
+from __future__ import annotations
+
+import warnings
+
 import numpy as np
 
-from scripts._common import load_env_config
 from envs import CentralizedMultiUAVEnv
+from fields.task_field import CHANNEL_INDEX, CHANNEL_NAMES, build_task_field
+from scripts._common import load_env_config
+
+
+def _env_config(**override) -> dict:
+    base_override = {"task_name": "coverage", "num_agents": 4}
+    base_override.update(override)
+    return load_env_config("configs/env/multitask.yaml", override=base_override)
+
+
+def test_channel_names_order_is_stable():
+    assert CHANNEL_NAMES == [
+        "obstacle",
+        "goal_reward",
+        "target_probability",
+        "desired_occupancy",
+        "risk",
+        "visited",
+        "agent_density",
+        "communication_quality",
+        "formation_template",
+    ]
+
+
+def test_build_task_field_fills_known_channels_and_ignores_unknown():
+    grid_size = 8
+    field = build_task_field(
+        {
+            "goal_reward": np.ones((grid_size, grid_size), dtype=np.float32),
+            "unknown_channel": np.full((grid_size, grid_size), 7.0, dtype=np.float32),
+        },
+        grid_size=grid_size,
+    )
+
+    assert np.allclose(field[CHANNEL_INDEX["goal_reward"]], 1.0)
+    untouched = [idx for name, idx in CHANNEL_INDEX.items() if name != "goal_reward"]
+    assert np.allclose(field[untouched], 0.0)
 
 
 def test_all_tasks_share_same_task_field_shape():
@@ -9,22 +49,50 @@ def test_all_tasks_share_same_task_field_shape():
     for task_name in ["goal_nav", "coverage", "formation", "risk_nav"]:
         env = CentralizedMultiUAVEnv({**config, "task_name": task_name})
         obs, info = env.reset(seed=3)
-        assert obs["task_field"].shape == (9, config["grid_size"], config["grid_size"])
+        assert obs["task_field"].shape == (len(CHANNEL_NAMES), config["grid_size"], config["grid_size"])
         if task_name == "goal_nav":
-            assert np.allclose(info["full_task_field"][2], 0.0)
+            assert np.allclose(info["full_task_field"][CHANNEL_INDEX["target_probability"]], 0.0)
         if task_name == "coverage":
-            assert info["full_task_field"][2].sum() > 0.0
+            assert info["full_task_field"][CHANNEL_INDEX["target_probability"]].sum() > 0.0
         if task_name == "formation":
-            assert info["full_task_field"][8].sum() > 0.0
+            assert info["full_task_field"][CHANNEL_INDEX["formation_template"]].sum() > 0.0
 
 
-def test_observation_ablation_modes():
-    base = load_env_config("configs/env/multitask.yaml", override={"task_name": "coverage"})
-    env_single = CentralizedMultiUAVEnv({**base, "observation_mode": "single_channel"})
+def test_drop_channels_and_agent_density_toggle_zero_out_channels():
+    env = CentralizedMultiUAVEnv(
+        _env_config(
+            include_agent_density=False,
+            drop_channels=["risk"],
+        )
+    )
+    _, info = env.reset(seed=9)
+    assert np.allclose(info["full_task_field"][CHANNEL_INDEX["risk"]], 0.0)
+    assert np.allclose(info["full_task_field"][CHANNEL_INDEX["agent_density"]], 0.0)
+
+
+def test_observation_variants_shapes_and_alias_equivalence():
+    env_multi = CentralizedMultiUAVEnv(_env_config(observation_mode="multi_channel_field"))
+    obs_multi, _ = env_multi.reset(seed=9)
+    assert obs_multi["task_field"].shape == (len(CHANNEL_NAMES), env_multi.grid_size, env_multi.grid_size)
+
+    env_single = CentralizedMultiUAVEnv(_env_config(observation_mode="single_channel_field"))
     obs_single, _ = env_single.reset(seed=9)
-    assert obs_single["task_field"].shape[0] == 1
+    assert obs_single["task_field"].shape == (1, env_single.grid_size, env_single.grid_size)
 
-    env_id = CentralizedMultiUAVEnv({**base, "observation_mode": "task_id_only"})
-    obs_id, _ = env_id.reset(seed=9)
-    assert obs_id["task_field"].shape[0] == 9
-    assert np.allclose(obs_id["task_field"], 0.0)
+    env_zero = CentralizedMultiUAVEnv(_env_config(observation_mode="no_spatial_field"))
+    obs_zero, _ = env_zero.reset(seed=9)
+    assert obs_zero["task_field"].shape == (len(CHANNEL_NAMES), env_zero.grid_size, env_zero.grid_size)
+    assert np.allclose(obs_zero["task_field"], 0.0)
+    assert obs_zero["agents"].shape == (env_zero.num_agents, 6)
+    assert obs_zero["task_id"].shape == (4,)
+    assert obs_zero["global_info"].shape == (5,)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        env_alias = CentralizedMultiUAVEnv(_env_config(observation_mode="task_id_only"))
+        obs_alias, _ = env_alias.reset(seed=9)
+
+    assert np.allclose(obs_alias["task_field"], obs_zero["task_field"])
+    assert np.allclose(obs_alias["agents"], obs_zero["agents"])
+    assert np.allclose(obs_alias["task_id"], obs_zero["task_id"])
+    assert np.allclose(obs_alias["global_info"], obs_zero["global_info"])

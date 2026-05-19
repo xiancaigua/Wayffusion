@@ -30,7 +30,8 @@ This isolates the intended contribution:
 
 ## Core design decisions
 
-- World: continuous 2D square `[0, 1] x [0, 1]`
+- World: continuous 2D square with default base extent `[0, 1] x [0, 1]`
+- Under `density_preserving`, the world expands to `[0, map_size] x [0, map_size]`
 - Visualization grid: default `64 x 64`
 - UAV state: `[x, y, vx, vy, battery, role_id]`
 - Action: relative waypoint delta in `[-1, 1]`, scaled by `max_waypoint_step`
@@ -49,6 +50,10 @@ This isolates the intended contribution:
 
 - `multi_channel`: full 9-channel task field
 - `single_channel`: weighted fusion into one channel
-- `task_id_only`: task field zeroed out, keeping `agents + task_id + global_info`
+- `no_spatial_field`: zero task field while keeping `agents + task_id + global_info`
+
+Backward compatibility:
+
+- `task_id_only` remains available as a deprecated alias for `no_spatial_field`
 
 These ablations let the benchmark evaluate whether the spatial task field itself carries useful inductive bias.

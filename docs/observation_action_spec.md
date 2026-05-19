@@ -17,7 +17,8 @@ The environment returns a Gymnasium-style observation dictionary:
 
 - Default shape: `[9, H, W]`
 - Single-channel ablation: `[1, H, W]`
-- `task_id_only`: same default shape, but all zeros
+- `no_spatial_field`: same default shape, but all zeros
+- `task_id_only`: deprecated alias for `no_spatial_field`
 
 Fixed channel order:
 
@@ -44,7 +45,7 @@ Fixed channel order:
 
 Ranges:
 
-- positions in `[0, 1]`
+- positions in `[0, map_size]`
 - velocities clipped by `max_speed`
 - battery is currently fixed at `1`
 - role id is currently `0`
@@ -60,12 +61,13 @@ Ranges:
 
 ### `global_info`
 
-- Shape: `[4]`
+- Shape: `[5]`
 - Layout:
   - normalized step progress
   - average collision rate so far
   - average risk exposure so far
   - task completion proxy
+  - current `map_size`
 
 ## Action
 
@@ -77,9 +79,9 @@ Execution:
 
 ```python
 delta = action * max_waypoint_step
-g_i = clip(p_i + delta_i, 0, 1)
+g_i = clip(p_i + delta_i, 0, map_size)
 v_i = clip(k_p * (g_i - p_i), max_speed)
-p_i_next = clip(p_i + dt * v_i, 0, 1)
+p_i_next = clip(p_i + dt * v_i, 0, map_size)
 ```
 
 The policy never emits low-level motor commands or direct task-allocation labels.

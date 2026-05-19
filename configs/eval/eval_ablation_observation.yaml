@@ -1,7 +1,7 @@
 tasks: [goal_nav, coverage]
 agent_counts: [4, 8, 10]
 observation_modes:
-  - {observation_mode: task_id_only, include_task_id: true}
+  - {observation_mode: no_spatial_field, include_task_id: true}
   - {observation_mode: single_channel_field, include_task_id: true}
   - {observation_mode: multi_channel_field, include_task_id: false}
   - {observation_mode: multi_channel_field, include_task_id: true}

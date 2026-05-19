@@ -11,6 +11,12 @@ class FormationTask(BaseTask):
     name = "formation"
     task_id = 2
 
+    def _radius_penalty_weight(self) -> float:
+        weights = self.config["reward_weights"]["formation"]
+        if "radius_error_penalty" in weights:
+            return float(abs(weights["radius_error_penalty"]))
+        return float(abs(weights.get("radius_error", 0.0)))
+
     def reset(self, rng: np.random.Generator, env_state: dict) -> dict:
         templates = self.config["formation"]["train_templates"]
         template = str(rng.choice(templates))
@@ -83,10 +89,11 @@ class FormationTask(BaseTask):
         radius_error = self._radius_error(env_state["positions"], task_state["target_position"], task_state["radius"])
         stability = 1.0 / (1.0 + float(np.std(env_state["formation_error_history"][-5:] or [error])))
         weights = self.config["reward_weights"]["formation"]
+        radius_penalty_weight = self._radius_penalty_weight()
         reward = (
             weights["error_reduction"] * progress
             + weights["angular_coverage"] * angular_uniformity
-            + weights["radius_error"] * radius_error
+            - radius_penalty_weight * radius_error
             + weights["stability"] * stability
         )
         metrics = self.get_metrics(task_state, env_state)
@@ -97,7 +104,7 @@ class FormationTask(BaseTask):
             components={
                 "formation_reward": weights["error_reduction"] * progress,
                 "angular_reward": weights["angular_coverage"] * angular_uniformity,
-                "radius_penalty": weights["radius_error"] * radius_error,
+                "radius_penalty": -radius_penalty_weight * radius_error,
                 "stability_reward": weights["stability"] * stability,
             },
         )
@@ -105,7 +112,7 @@ class FormationTask(BaseTask):
     def get_metrics(self, task_state, env_state) -> dict:
         error = self._formation_error(env_state["positions"], task_state["slots"])
         angular_uniformity = self._angular_uniformity(env_state["positions"], task_state["target_position"])
-        radius_error = abs(self._radius_error(env_state["positions"], task_state["target_position"], task_state["radius"]))
+        radius_error = self._radius_error(env_state["positions"], task_state["target_position"], task_state["radius"])
         stability = 1.0 / (1.0 + float(np.std(env_state["formation_error_history"][-10:] or [error])))
         tolerance = self.config["formation_tolerance"] * env_state["spatial_scale"]
         success = (
@@ -159,4 +166,4 @@ class FormationTask(BaseTask):
     @staticmethod
     def _radius_error(positions: np.ndarray, center: np.ndarray, radius: float) -> float:
         dists = np.linalg.norm(positions - center[None, :], axis=-1)
-        return float(-np.abs(dists - radius).mean())
+        return float(np.abs(dists - radius).mean())

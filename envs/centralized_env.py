@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
+import warnings
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -97,6 +98,13 @@ class CentralizedMultiUAVEnv(gym.Env):
             return "multi_channel_field"
         if self.observation_mode == "single_channel":
             return "single_channel_field"
+        if self.observation_mode == "task_id_only":
+            warnings.warn(
+                "'task_id_only' is a deprecated alias; use 'no_spatial_field' instead.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            return "no_spatial_field"
         return self.observation_mode
 
     def _derive_runtime_params(self) -> dict[str, float]:
@@ -285,7 +293,7 @@ class CentralizedMultiUAVEnv(gym.Env):
         mode = self._canonical_observation_mode()
         task_field = adapt_task_field(
             full_task_field,
-            "task_id_only" if mode == "task_id_only" else ("single_channel" if mode == "single_channel_field" else "multi_channel"),
+            "no_spatial_field" if mode == "no_spatial_field" else ("single_channel" if mode == "single_channel_field" else "multi_channel"),
             weights=self.config.get("single_channel_weights"),
         )
         agents = np.concatenate(
@@ -337,6 +345,7 @@ class CentralizedMultiUAVEnv(gym.Env):
             kp=float(self.config["kp"]),
             max_speed=self.runtime_params["max_speed"],
             dt=float(self.config["dt"]),
+            map_size=self.runtime_params["map_size"],
         )
         obstacle_mask = obstacle_collision_mask(
             proposed_positions,

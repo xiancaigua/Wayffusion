@@ -14,7 +14,6 @@ from algorithms import SACTrainer
 from policies import build_policy
 from scripts._common import (
     baseline_reference_episodes_for_agent_count,
-    baseline_reference_table,
     build_metric_logger,
     format_agent_set_name,
     format_obs_variant_name,
@@ -29,7 +28,7 @@ from scripts._common import (
     timestamped_training_dir,
     write_metrics_csv,
 )
-from utils import aggregate_episode_records, apply_reference_normalization, evaluate_policy_episodes, make_env_batch
+from utils import evaluate_policy_per_task, make_env_batch
 
 
 def main():
@@ -98,6 +97,8 @@ def main():
         metrics = trainer.train(
             output_dir,
             eval_env=env_batch.envs[0],
+            eval_task_names=task_names,
+            eval_base_env_config=env_config,
             eval_episodes=args.eval_episodes,
             headless=args.headless,
             record_eval_episodes=args.record_eval_episodes,
@@ -108,13 +109,11 @@ def main():
         )
         write_metrics_csv(metrics, output_dir / "training_metrics.csv")
 
-        from envs import CentralizedMultiUAVEnv
-
-        eval_env = CentralizedMultiUAVEnv(env_config)
         final_media_dir = output_dir / "final_eval_media" if args.record_eval_episodes > 0 else None
-        eval_records = evaluate_policy_episodes(
-            eval_env,
+        _, task_summaries, overall_summary = evaluate_policy_per_task(
+            env_config,
             trainer.actor,
+            task_names,
             args.eval_episodes,
             trainer.device,
             headless=args.headless,
@@ -123,40 +122,63 @@ def main():
             record_format=args.record_format,
             record_fps=args.record_fps,
             record_prefix=f"final_eval_N{agent_count}",
+            normalize_with_reference=True,
+            reference_episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
         )
-        reference_table = baseline_reference_table(
-            env_config,
-            episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
-        )
-        normalized_records = [apply_reference_normalization(record, reference_table) for record in eval_records]
-        summary = aggregate_episode_records(normalized_records)
         final_step = int(metrics[-1].get("step", trainer.total_steps)) if metrics else int(trainer.total_steps)
-        log_scalar_metrics(writer, f"{output_root}/final_eval/N{agent_count}", final_step, summary)
-        print_progress_line(
-            f"{output_root}-final",
-            "num_agents",
-            agent_count,
-            summary,
-            key_order=["return_mean", "normalized_score_mean", "success_rate_mean", "collision_rate_mean"],
-        )
-        write_metrics_csv(
-            [
+        eval_rows = []
+        for task_name, task_summary in task_summaries.items():
+            log_scalar_metrics(writer, f"{output_root}/final_eval/N{agent_count}/{task_name}", final_step, task_summary)
+            print_progress_line(
+                f"{output_root}-final/{task_name}",
+                "num_agents",
+                agent_count,
+                task_summary,
+                key_order=["return_mean", "normalized_score_mean", "success_rate_mean", "collision_rate_mean"],
+            )
+            eval_rows.append(
                 {
+                    **task_summary,
                     "method": "bc_sac" if args.init_checkpoint else "sac",
                     "algorithm": "sac",
                     "architecture": config["policy_class"],
                     "observation_mode": env_config.get("observation_mode", "multi_channel_field"),
+                    "obs_variant": args.obs_variant,
                     "task_set": format_task_set_name(task_names),
-                    "task_name": "multitask" if len(task_names) > 1 else task_names[0],
+                    "task_name": task_name,
+                    "eval_group": "per_task",
                     "num_agents": agent_count,
                     "scaling_mode": args.scaling_mode,
                     "seed": int(env_config.get("seed", 0)),
-                    "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
-                    **summary,
+                    "normalized_score": float(task_summary.get("normalized_score_mean", 0.0)),
                 }
-            ],
-            output_dir / "eval_metrics.csv",
+            )
+        log_scalar_metrics(writer, f"{output_root}/final_eval/N{agent_count}/overall", final_step, overall_summary)
+        print_progress_line(
+            f"{output_root}-final/overall",
+            "num_agents",
+            agent_count,
+            overall_summary,
+            key_order=["return_mean", "normalized_score_mean", "success_rate_mean", "collision_rate_mean"],
         )
+        eval_rows.append(
+            {
+                **overall_summary,
+                "method": "bc_sac" if args.init_checkpoint else "sac",
+                "algorithm": "sac",
+                "architecture": config["policy_class"],
+                "observation_mode": env_config.get("observation_mode", "multi_channel_field"),
+                "obs_variant": args.obs_variant,
+                "task_set": format_task_set_name(task_names),
+                "task_name": "overall",
+                "eval_group": "overall",
+                "num_agents": agent_count,
+                "scaling_mode": args.scaling_mode,
+                "seed": int(env_config.get("seed", 0)),
+                "normalized_score": float(overall_summary.get("normalized_score_mean", 0.0)),
+            }
+        )
+        write_metrics_csv(eval_rows, output_dir / "eval_metrics.csv")
     finally:
         if writer is not None:
             writer.close()

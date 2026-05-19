@@ -68,7 +68,7 @@ Reward terms:
 
 - positive reward for formation-error reduction
 - reward for uniform angular coverage
-- penalty for radius mismatch
+- explicit penalty for positive radius mismatch error
 - shared penalties for collisions, path length, and safety
 
 Metrics:

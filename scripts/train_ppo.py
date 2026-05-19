@@ -15,7 +15,6 @@ from algorithms import PPOTrainer
 from policies import build_policy
 from scripts._common import (
     baseline_reference_episodes_for_agent_count,
-    baseline_reference_table,
     build_metric_logger,
     checkpoints_dir,
     format_agent_set_name,
@@ -31,7 +30,7 @@ from scripts._common import (
     timestamped_training_dir,
     write_metrics_csv,
 )
-from utils import aggregate_episode_records, apply_reference_normalization, evaluate_policy_episodes, make_env_batch
+from utils import evaluate_policy_per_task, flatten_task_eval_summaries, make_env_batch
 
 
 def main():
@@ -118,6 +117,8 @@ def main():
             history = trainer.train(
                 output_dir,
                 eval_env=env_build.envs[0],
+                eval_task_names=task_names,
+                eval_base_env_config=base_env_config,
                 eval_episodes=args.eval_episodes,
                 headless=args.headless,
                 record_eval_episodes=args.record_eval_episodes,
@@ -155,24 +156,73 @@ def main():
                 record = {"update": update_idx, "sampled_num_agents": chosen_n, **rollout_stats, **train_stats}
                 if update_idx % eval_interval == 0 or update_idx == total_updates:
                     eval_count += 1
-                    eval_env = env_batches[agent_counts[0]].envs[0]
                     media_dir = None
                     media_episodes = 0
                     if args.record_eval_episodes > 0 and eval_count % max(args.record_interval, 1) == 0:
                         media_dir = output_dir / "media" / f"eval_{update_idx:04d}"
                         media_episodes = int(args.record_eval_episodes)
-                    record.update(
-                        trainer.evaluate(
-                            eval_env,
-                            episodes=args.eval_episodes,
+                    eval_overall_returns = []
+                    eval_overall_success_rates = []
+                    eval_overall_collision_rates = []
+                    eval_overall_path_lengths = []
+                    eval_overall_inference_latencies = []
+                    for eval_agent_count in agent_counts:
+                        eval_base_env_config = prepare_env_config(
+                            args.env_config,
+                            tasks=task_names,
+                            num_agents=eval_agent_count,
+                            scaling_mode=args.scaling_mode,
+                            observation_override=observation_override_from_variant(args.obs_variant),
+                        )
+                        task_record_dir = media_dir / f"N{eval_agent_count}" if media_dir is not None else None
+                        _, task_summaries, overall_summary = evaluate_policy_per_task(
+                            eval_base_env_config,
+                            trainer.policy,
+                            task_names,
+                            args.eval_episodes,
+                            trainer.device,
                             headless=args.headless,
-                            record_dir=media_dir,
+                            record_dir=task_record_dir,
                             record_episodes=media_episodes,
                             record_format=args.record_format,
                             record_fps=args.record_fps,
-                            record_prefix=f"update_{update_idx:04d}",
+                            record_prefix=f"update_{update_idx:04d}_N{eval_agent_count}",
+                            normalize_with_reference=False,
                         )
-                    )
+                        record.update(
+                            flatten_task_eval_summaries(
+                                task_summaries,
+                                overall_summary,
+                                prefix=f"eval_N{eval_agent_count}",
+                            )
+                        )
+                        if "return_mean" in overall_summary:
+                            eval_overall_returns.append(float(overall_summary["return_mean"]))
+                        if "success_rate_mean" in overall_summary:
+                            eval_overall_success_rates.append(float(overall_summary["success_rate_mean"]))
+                        if "collision_rate_mean" in overall_summary:
+                            eval_overall_collision_rates.append(float(overall_summary["collision_rate_mean"]))
+                        if "path_length_mean" in overall_summary:
+                            eval_overall_path_lengths.append(float(overall_summary["path_length_mean"]))
+                        if "inference_latency_ms_mean" in overall_summary:
+                            eval_overall_inference_latencies.append(float(overall_summary["inference_latency_ms_mean"]))
+                    if eval_overall_returns:
+                        record["eval_overall_return"] = float(np.mean(eval_overall_returns))
+                        record["eval_reward"] = record["eval_overall_return"]
+                    if eval_overall_success_rates:
+                        record["eval_overall_success_rate"] = float(np.mean(eval_overall_success_rates))
+                        record["eval_success_rate"] = record["eval_overall_success_rate"]
+                    if eval_overall_collision_rates:
+                        record["eval_overall_collision_rate"] = float(np.mean(eval_overall_collision_rates))
+                        record["eval_collision_rate"] = record["eval_overall_collision_rate"]
+                    if eval_overall_path_lengths:
+                        record["eval_overall_path_length"] = float(np.mean(eval_overall_path_lengths))
+                        record["eval_path_length"] = record["eval_overall_path_length"]
+                    if eval_overall_inference_latencies:
+                        record["eval_overall_inference_latency_ms"] = float(np.mean(eval_overall_inference_latencies))
+                        record["eval_inference_latency_ms"] = record["eval_overall_inference_latency_ms"]
+                    if media_dir is not None and media_episodes > 0:
+                        record["eval_media_dir"] = str(media_dir)
                     checkpoint_path = checkpoints_dir(output_dir) / f"checkpoint_{update_idx:04d}.pt"
                     torch.save({"model_state_dict": trainer.policy.state_dict(), "train_config": train_config}, checkpoint_path)
                     record["checkpoint_path"] = str(checkpoint_path)
@@ -192,13 +242,11 @@ def main():
                 scaling_mode=args.scaling_mode,
                 observation_override=observation_override_from_variant(args.obs_variant),
             )
-            from envs import CentralizedMultiUAVEnv
-
-            eval_env = CentralizedMultiUAVEnv(eval_env_config)
             final_media_dir = output_dir / "final_eval_media" / f"N{agent_count}" if args.record_eval_episodes > 0 else None
-            records = evaluate_policy_episodes(
-                eval_env,
+            _, task_summaries, overall_summary = evaluate_policy_per_task(
+                eval_env_config,
                 trainer.policy,
+                task_names,
                 args.eval_episodes,
                 trainer.device,
                 headless=args.headless,
@@ -207,34 +255,58 @@ def main():
                 record_format=args.record_format,
                 record_fps=args.record_fps,
                 record_prefix=f"final_eval_N{agent_count}",
+                normalize_with_reference=True,
+                reference_episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
             )
-            reference_table = baseline_reference_table(
-                eval_env_config,
-                episodes=baseline_reference_episodes_for_agent_count(agent_count, max(4, args.eval_episodes // 2)),
-            )
-            normalized_records = [apply_reference_normalization(record, reference_table) for record in records]
-            summary = aggregate_episode_records(normalized_records)
-            log_scalar_metrics(writer, f"{output_root}/final_eval/N{agent_count}", final_update, summary)
+            for task_name, task_summary in task_summaries.items():
+                log_scalar_metrics(writer, f"{output_root}/final_eval/N{agent_count}/{task_name}", final_update, task_summary)
+                print_progress_line(
+                    f"{output_root}-final/{task_name}",
+                    "num_agents",
+                    agent_count,
+                    task_summary,
+                    key_order=["return_mean", "normalized_score_mean", "success_rate_mean", "collision_rate_mean"],
+                )
+                eval_records.append(
+                    {
+                        **task_summary,
+                        "method": "bc_ppo" if args.init_checkpoint else "ppo",
+                        "algorithm": "ppo",
+                        "architecture": train_config["policy_class"],
+                        "observation_mode": eval_env_config.get("observation_mode", "multi_channel_field"),
+                        "obs_variant": args.obs_variant,
+                        "task_set": format_task_set_name(task_names),
+                        "task_name": task_name,
+                        "eval_group": "per_task",
+                        "num_agents": agent_count,
+                        "scaling_mode": args.scaling_mode,
+                        "seed": int(eval_env_config.get("seed", 0)),
+                        "normalized_score": float(task_summary.get("normalized_score_mean", 0.0)),
+                    }
+                )
+            log_scalar_metrics(writer, f"{output_root}/final_eval/N{agent_count}/overall", final_update, overall_summary)
             print_progress_line(
-                f"{output_root}-final",
+                f"{output_root}-final/overall",
                 "num_agents",
                 agent_count,
-                summary,
+                overall_summary,
                 key_order=["return_mean", "normalized_score_mean", "success_rate_mean", "collision_rate_mean"],
             )
             eval_records.append(
                 {
+                    **overall_summary,
                     "method": "bc_ppo" if args.init_checkpoint else "ppo",
                     "algorithm": "ppo",
                     "architecture": train_config["policy_class"],
                     "observation_mode": eval_env_config.get("observation_mode", "multi_channel_field"),
+                    "obs_variant": args.obs_variant,
                     "task_set": format_task_set_name(task_names),
-                    "task_name": "multitask" if len(task_names) > 1 else task_names[0],
+                    "task_name": "overall",
+                    "eval_group": "overall",
                     "num_agents": agent_count,
                     "scaling_mode": args.scaling_mode,
                     "seed": int(eval_env_config.get("seed", 0)),
-                    "normalized_score": float(summary.get("normalized_score_mean", 0.0)),
-                    **summary,
+                    "normalized_score": float(overall_summary.get("normalized_score_mean", 0.0)),
                 }
             )
         write_metrics_csv(eval_records, output_dir / "eval_metrics.csv")
