@@ -24,6 +24,14 @@ If you prefer to avoid activation, every command below also works as:
 .\.venv\Scripts\python.exe <script> ...
 ```
 
+## Ubuntu Docker server training
+
+For Ubuntu Docker servers based on `pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel`, use the server-specific guide:
+
+- `docs/server_training_zh.md`
+
+Install server dependencies with `requirements-server.txt` instead of `requirements.txt` so the image-provided CUDA-enabled torch is not upgraded by pip. Training outputs and TensorBoard event files remain under `outputs/training`; point TensorBoard at that directory.
+
 ## Project layout
 
 - `envs/`: centralized Gymnasium-style environment, dynamics, collisions, rewards, metrics
@@ -127,6 +135,12 @@ Train PPO from scratch:
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets.yaml --tasks goal_nav coverage --agent_counts 4 --tensorboard --console_log_interval 5
 .\.venv\Scripts\python.exe scripts/train_ppo.py --config configs/policy/ppo_cnn_deepsets_multitask_20k.yaml --tasks goal_nav coverage formation risk_nav --agent_counts 4 --total_updates 850 --target_episodes 0
 .\scripts\run_multitask_ppo_20k.ps1
+```
+
+For a long headless Ubuntu/Linux PPO run over all four tasks with periodic evaluation, checkpoints, TensorBoard, and GIF recordings:
+
+```bash
+bash scripts/run_ppo_all_tasks_long.sh
 ```
 
 View TensorBoard for training runs:

@@ -182,3 +182,39 @@ Reason:
 
 - trust-worthy evaluation should expose both task-level failures and cross-`N` failures
 - fixed-task breakdowns are now consistent across online training logs, eval scripts, and saved CSV outputs
+
+## Theme N: Ubuntu Docker server training adaptation
+
+Implemented:
+
+- added `requirements-server.txt` for PyTorch Docker images that already provide CUDA-enabled torch
+- kept the existing `requirements.txt` as the generic environment file and added the missing `psutil` dependency there
+- added `docs/server_training_zh.md` with Docker launch, proxy verification, dependency installation, GPU checks, smoke tests, TensorBoard forwarding, long-run training, and common troubleshooting
+- added `scripts/server/check_server_env.py` for offline server environment diagnostics
+- added `scripts/server/smoke_train_ppo.sh` for a short headless PPO training and GIF-recording check
+- added `scripts/server/start_tensorboard.sh` for the canonical `outputs/training` TensorBoard logdir
+- added a README entry pointing server users to the dedicated guide
+- extended `.gitignore` so server-side test runs do not leave Python cache files as untracked worktree noise
+
+Reason:
+
+- the target server image is `pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel`, so server installs must avoid upgrading torch through pip
+- server training must remain headless and preserve the existing `outputs/training/<algorithm>/<timestamp>/<run_name>/` artifact layout
+- `utils/profiling.py` imports `psutil`, so server and generic dependency files now declare it explicitly
+
+## Theme O: Long all-task PPO training launcher
+
+Implemented:
+
+- added `scripts/run_ppo_all_tasks_long.sh` as the Linux/Ubuntu launcher for long PPO training across `goal_nav coverage formation risk_nav`
+- default run uses `configs/policy/ppo_cnn_deepsets_multitask_20k.yaml`, `total_updates=2000`, `target_episodes=0`, `eval_episodes=5`, and `agent_counts=4`
+- periodic evaluation and checkpointing follow the config's PPO `eval_interval` of 25 updates
+- GIF recording is enabled with `record_eval_episodes=1` and `record_interval=4`, so media is saved every 100 updates plus final evaluation media
+- script defaults to headless training, TensorBoard enabled, `MPLBACKEND=Agg`, and `CUDA_VISIBLE_DEVICES=0`, while allowing shell environment overrides
+- script has a top-level editable `DEFAULT_*` configuration block so normal parameter changes can be made inside the `.sh` file
+- README now points Linux users to the long all-task launcher
+
+Reason:
+
+- server users need one direct command for long all-task PPO training that preserves the existing artifact contract
+- checkpoints, TensorBoard logs, evaluation CSVs, and GIFs continue to live under `outputs/training/ppo/<timestamp>/<run_name>/`

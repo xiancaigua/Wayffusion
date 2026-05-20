@@ -3,7 +3,6 @@ numpy>=2.0
 scipy>=1.15
 matplotlib>=3.10
 PyYAML>=6.0
-torch>=2.9
 imageio>=2.37
 tensorboard>=2.19
 pytest>=8.0

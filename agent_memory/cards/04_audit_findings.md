@@ -94,6 +94,19 @@
 
 ## 四、潜在工程风险
 
+### 0. 服务器训练依赖与部署文档缺口已处理
+
+2026-05-20 服务器训练适配已处理以下工程缺口：
+
+- `utils/profiling.py` 依赖 `psutil`，现在 `requirements.txt` 和 `requirements-server.txt` 都显式包含 `psutil`
+- 新增 `requirements-server.txt`，用于已有 CUDA torch 的 PyTorch Docker 镜像，避免服务器上 pip 安装时升级 torch
+- 新增 `docs/server_training_zh.md` 和 `scripts/server/`，覆盖 headless 训练、代理验证、GPU 检查、PPO smoke train、TensorBoard 启动和 SSH 转发
+
+剩余注意事项：
+
+- `requirements.txt` 仍保留通用环境的 `torch>=2.9` 约束；服务器容器应使用 `requirements-server.txt`
+- 服务器训练文档是部署流程来源，不改变算法、环境、任务、策略或输出目录语义
+
 ### 1. 评估入口仍偏手工
 
 - `evaluate_policy.py` 仍要求显式 checkpoint 路径
