@@ -143,6 +143,12 @@ For a long headless Ubuntu/Linux PPO run over all four tasks with periodic evalu
 bash scripts/run_ppo_all_tasks_long.sh
 ```
 
+For sequential PPO sweeps over editable task combinations with email notification:
+
+```bash
+bash scripts/run_ppo_task_queue.sh
+```
+
 View TensorBoard for training runs:
 
 ```powershell

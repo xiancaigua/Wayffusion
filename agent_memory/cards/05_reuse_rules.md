@@ -32,6 +32,7 @@ Preconditions:
 - TensorBoard should read the canonical training root: `outputs/training`
 - server media and checkpoints should continue using the existing run layout under `outputs/training/<algorithm>/<timestamp>/<run_name>/`
 - for long Linux all-task PPO training, prefer `bash scripts/run_ppo_all_tasks_long.sh`; edit the top-level `DEFAULT_*` block for persistent run settings, or override `TOTAL_UPDATES`, `CUDA_VISIBLE_DEVICES`, `AGENT_COUNTS`, `EVAL_EPISODES`, or `RECORD_INTERVAL` from the shell for one-off runs
+- for sequential PPO task-combination sweeps, prefer `bash scripts/run_ppo_task_queue.sh`; edit the queue rows at the top of the file so every task combination can carry its own training/evaluation/GIF/GPU settings
 
 ## Config layer
 

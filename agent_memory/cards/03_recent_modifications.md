@@ -218,3 +218,18 @@ Reason:
 
 - server users need one direct command for long all-task PPO training that preserves the existing artifact contract
 - checkpoints, TensorBoard logs, evaluation CSVs, and GIFs continue to live under `outputs/training/ppo/<timestamp>/<run_name>/`
+
+## Theme P: Sequential PPO task-combination queue launcher
+
+Implemented:
+
+- added `scripts/run_ppo_task_queue.sh` for sequential PPO training over editable task-combination rows
+- each queue row has its own label, task list, agent counts, update budget, eval episodes, GIF recording cadence, GPU selection, and extra CLI args
+- queue runs remain headless, use TensorBoard, preserve `outputs/training/ppo/<timestamp>/<run_name>/`, and write queue logs under `outputs/training/task_queue/<timestamp>/`
+- completion notification targets `muadib@foxmail.com` by default and supports SMTP env vars or local `mail` / `mailx` / `sendmail`
+- README now includes the queue launcher entrypoint
+
+Reason:
+
+- task-combination sweeps need repeatable sequential execution without manually starting every PPO run
+- per-row parameters make it practical to debug different task mixes and hyperparameter variants while keeping the existing PPO training contract
