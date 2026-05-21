@@ -5,6 +5,14 @@ from torch.distributions import Normal
 
 
 class SquashedNormal:
+    """Gaussian policy distribution squashed into the environment action range.
+
+    Policies produce an unconstrained Gaussian in raw action space. Applying
+    `tanh` maps samples into [-1, 1], matching the waypoint-delta action space.
+    Log-probabilities must include the tanh change-of-variables correction;
+    otherwise PPO/SAC would optimize the wrong likelihood.
+    """
+
     def __init__(self, mean: torch.Tensor, std: torch.Tensor, eps: float = 1e-6):
         self.mean = mean
         self.std = std
@@ -12,6 +20,8 @@ class SquashedNormal:
         self.base_dist = Normal(mean, std)
 
     def _clamp_action(self, action: torch.Tensor) -> torch.Tensor:
+        # atanh is undefined exactly at -1 or 1, so clamp actions slightly inside
+        # the open interval before evaluating inverse tanh or log corrections.
         return torch.clamp(action, -1.0 + self.eps, 1.0 - self.eps)
 
     def atanh(self, action: torch.Tensor) -> torch.Tensor:
@@ -20,6 +30,7 @@ class SquashedNormal:
 
     def _log_prob_from_raw(self, raw_action: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         bounded = self._clamp_action(action)
+        # For y=tanh(x), log p(y)=log p(x)-log|dy/dx| and dy/dx=1-y^2.
         correction = torch.log(torch.clamp(1.0 - bounded.pow(2), min=self.eps))
         return self.base_dist.log_prob(raw_action) - correction
 
@@ -31,6 +42,9 @@ class SquashedNormal:
         return action
 
     def rsample(self, return_raw: bool = False):
+        # rsample keeps the reparameterization path for algorithms that need
+        # gradients through sampled actions, while PPO still stores detached
+        # actions/log-probs during rollout collection.
         raw_action = self.base_dist.rsample()
         action = torch.tanh(raw_action)
         if return_raw:

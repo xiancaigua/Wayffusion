@@ -8,6 +8,13 @@ from policies.action_distribution import SquashedNormal
 
 
 class MLPPolicy(nn.Module):
+    """Fixed-N baseline policy that flattens the entire observation.
+
+    This is useful as a simple baseline and smoke-test architecture. Because the
+    input and action layers are sized from `observation_space` / `action_space`,
+    it is not suitable for variable-N training without rebuilding the network.
+    """
+
     def __init__(self, observation_space, action_space, hidden_dims: list[int] | None = None):
         super().__init__()
         hidden_dims = hidden_dims or [256, 256]
@@ -29,6 +36,9 @@ class MLPPolicy(nn.Module):
         self.action_shape = action_space.shape
 
     def _flatten_obs(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
+        # Flatten all observation components into one vector per batch item.
+        # This deliberately discards spatial/permutation structure for baseline
+        # simplicity.
         parts = []
         for key in ("task_field", "agents", "task_id", "global_info"):
             parts.append(obs[key].reshape(obs[key].shape[0], -1))
@@ -42,6 +52,8 @@ class MLPPolicy(nn.Module):
         return mean, value
 
     def get_action_and_value(self, obs: dict[str, torch.Tensor], action: torch.Tensor | None = None):
+        """Sample or score a full flattened joint action."""
+
         mean, value = self(obs)
         std = self.log_std.exp().view(1, *self.action_shape).expand_as(mean)
         dist = SquashedNormal(mean, std)

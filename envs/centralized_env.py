@@ -26,6 +26,14 @@ from tasks import TASK_NAME_TO_ID, TASK_ORDER, TaskSampler
 
 
 class CentralizedMultiUAVEnv(gym.Env):
+    """Centralized multi-UAV benchmark environment.
+
+    The whole swarm is modeled as one Gymnasium agent. A policy observes the
+    global task field plus all UAV states, then outputs one joint waypoint delta
+    for every UAV. This class intentionally keeps the dynamics numerical and
+    lightweight: it is a benchmark environment, not a flight-control simulator.
+    """
+
     metadata = {"render_modes": ["human", "rgb_array"]}
 
     def __init__(self, config: dict):
@@ -49,6 +57,9 @@ class CentralizedMultiUAVEnv(gym.Env):
         self.trajectory_history: list[list[np.ndarray]] = [[] for _ in range(self.num_agents)]
         self.state: dict[str, Any] = {}
 
+        # Runtime parameters fold the selected scaling mode into all physical
+        # distances and speeds. The public config remains task-agnostic, while
+        # the environment state uses the derived map size and radii.
         self.runtime_params = self._derive_runtime_params()
         task_field_shape = self._task_field_shape()
         agent_low = np.tile(
@@ -72,6 +83,11 @@ class CentralizedMultiUAVEnv(gym.Env):
             ),
             (self.num_agents, 1),
         )
+        # Observation contract used by all policies:
+        # - task_field: spatial task channels [C, H, W]
+        # - agents: per-UAV state [x, y, vx, vy, battery, role_id]
+        # - task_id: one-hot task family id, optionally zeroed for ablations
+        # - global_info: compact scalar progress / safety summary
         self.observation_space = spaces.Dict(
             {
                 "task_field": spaces.Box(low=0.0, high=1.0, shape=task_field_shape, dtype=np.float32),
@@ -85,6 +101,8 @@ class CentralizedMultiUAVEnv(gym.Env):
                 "global_info": spaces.Box(low=-10.0, high=10.0, shape=(5,), dtype=np.float32),
             }
         )
+        # Action is a normalized joint waypoint delta for the centralized
+        # controller. The environment rescales it by max_waypoint_step.
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_agents, 2), dtype=np.float32)
 
     def _task_field_shape(self) -> tuple[int, int, int]:
@@ -108,6 +126,13 @@ class CentralizedMultiUAVEnv(gym.Env):
         return self.observation_mode
 
     def _derive_runtime_params(self) -> dict[str, float]:
+        """Derive scale-dependent simulation constants from the base config.
+
+        `fixed_map` keeps the map size fixed while increasing task density with
+        N. `density_preserving` expands the map with sqrt(N/reference_N), so the
+        average spatial density stays closer to the reference setting.
+        """
+
         task_count_scale = float(max(self.num_agents, 1) / max(self.reference_num_agents, 1))
         if self.scaling_mode == "density_preserving":
             spatial_scale = float(np.sqrt(max(self.num_agents, 1) / max(self.reference_num_agents, 1)))
@@ -142,6 +167,8 @@ class CentralizedMultiUAVEnv(gym.Env):
         return self.task_sampler.sample(self.rng).name
 
     def reset(self, seed: int | None = None, options: dict | None = None):
+        """Sample a task, initialize maps/UAV states, and build the first obs."""
+
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         if options and "task_name" in options:
@@ -163,6 +190,13 @@ class CentralizedMultiUAVEnv(gym.Env):
         return obs, info
 
     def _build_initial_state(self) -> dict:
+        """Create the mutable episode state shared by dynamics and tasks.
+
+        Task-specific objects such as goals, coverage peaks, or formation slots
+        are added by the selected task's `reset(...)`; this method only creates
+        common maps, UAV kinematics, and counters.
+        """
+
         obstacle_size_range = [float(x) * self.runtime_params["spatial_scale"] for x in self.config["obstacle_size_range"]]
         obstacle_map = sample_obstacle_map(
             self.rng,
@@ -212,6 +246,13 @@ class CentralizedMultiUAVEnv(gym.Env):
         }
 
     def _sample_free_positions(self, obstacle_map: np.ndarray, num_agents: int) -> np.ndarray:
+        """Sample initial UAV positions outside obstacles with relaxed spacing.
+
+        Dense large-N cases may not fit the ideal separation. The staged
+        relaxation avoids failing early while still preferring non-overlapping
+        starts when the map allows it.
+        """
+
         positions = []
         trials = 0
         base_separation = self.runtime_params["collision_radius"] * 1.8
@@ -246,6 +287,8 @@ class CentralizedMultiUAVEnv(gym.Env):
         return np.stack(positions, axis=0)
 
     def _snapshot_state(self) -> dict:
+        """Copy state before transition so reward functions can compare deltas."""
+
         snapshot = {}
         for key, value in self.state.items():
             if isinstance(value, np.ndarray):
@@ -257,6 +300,8 @@ class CentralizedMultiUAVEnv(gym.Env):
         return snapshot
 
     def _compose_channel_maps(self) -> dict[str, np.ndarray]:
+        """Build named spatial maps before packing them into fixed channels."""
+
         positions = self.state["positions"]
         centroid = positions.mean(axis=0, keepdims=True)
         channel_maps = {
@@ -280,6 +325,9 @@ class CentralizedMultiUAVEnv(gym.Env):
                 1.0,
             ),
         }
+        # Task modules inject their own semantic channels. For example,
+        # goal_nav contributes goal_reward / target_probability, coverage
+        # contributes desired_occupancy, and formation contributes templates.
         channel_maps.update(self.current_task.build_field(self.current_task_state, self.state))
         if not self.include_agent_density:
             channel_maps["agent_density"] = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
@@ -289,6 +337,8 @@ class CentralizedMultiUAVEnv(gym.Env):
         return channel_maps
 
     def _build_observation(self) -> dict[str, np.ndarray]:
+        """Convert mutable simulator state into the policy observation dict."""
+
         full_task_field = build_task_field(self._compose_channel_maps(), self.grid_size)
         mode = self._canonical_observation_mode()
         task_field = adapt_task_field(
@@ -304,6 +354,9 @@ class CentralizedMultiUAVEnv(gym.Env):
         if self.include_task_id:
             task_id[TASK_NAME_TO_ID[self.current_task.name]] = 1.0
         completed_ratio = self._completed_ratio()
+        # Keep scalar features normalized where possible. map_size remains raw
+        # because policies need to know the coordinate scale in density-preserved
+        # evaluation where maps can be larger than the unit square.
         global_info = np.array(
             [
                 self.state["step_count"] / max(int(self.state["max_steps"]), 1),
@@ -332,12 +385,22 @@ class CentralizedMultiUAVEnv(gym.Env):
         return 0.0
 
     def step(self, action: np.ndarray):
+        """Advance one centralized-control environment step.
+
+        The policy proposes waypoint deltas for all UAVs at once. The simulator
+        then applies a simple proportional waypoint controller, resolves
+        collisions by reverting unsafe moves, updates shared task maps/counters,
+        and finally combines task-specific reward with common safety costs.
+        """
+
         prev_state = self._snapshot_state()
         action = np.asarray(action, dtype=np.float32)
         action = np.clip(action, self.action_space.low, self.action_space.high)
         deltas = action * self.runtime_params["max_waypoint_step"]
         waypoints = np.clip(self.state["positions"] + deltas, 0.0, self.runtime_params["map_size"])
 
+        # Let task logic update moving targets or other task-side state before
+        # dynamics and reward evaluation for this transition.
         self.current_task.step_update(self.current_task_state, self.state)
         proposed_positions, proposed_velocities = waypoint_controller(
             self.state["positions"],
@@ -347,6 +410,9 @@ class CentralizedMultiUAVEnv(gym.Env):
             dt=float(self.config["dt"]),
             map_size=self.runtime_params["map_size"],
         )
+        # Obstacle and inter-agent collisions are handled conservatively: any
+        # unsafe proposed move is rejected for the affected UAV(s), and the
+        # corresponding counters feed common reward penalties and metrics.
         obstacle_mask = obstacle_collision_mask(
             proposed_positions,
             self.state["obstacle_map"],
@@ -372,6 +438,8 @@ class CentralizedMultiUAVEnv(gym.Env):
         self.state["obstacle_collision_count"] += int(obstacle_mask.sum())
         self.state["step_count"] += 1
 
+        # Coverage-style state is maintained for all tasks because it is both a
+        # task signal and a useful observation channel for multi-task policies.
         step_coverage_mask = accumulate_disks(
             self.state["positions"],
             self.runtime_params["coverage_radius"],
@@ -383,6 +451,8 @@ class CentralizedMultiUAVEnv(gym.Env):
         visit_requirement = max(float(self.state.get("visit_requirement", 1.0)), 1.0)
         self.state["visited_map"] = np.clip(self.state["visit_count_map"] / visit_requirement, 0.0, 1.0)
 
+        # Risk exposure is sampled at the resolved positions, so rejected unsafe
+        # moves do not accidentally accrue exposure at unreachable positions.
         risk_samples = self._sample_map_values(self.state["risk_map"], self.state["positions"])
         step_risk_exposure = float(risk_samples.sum())
         step_safety_violations = int((risk_samples >= float(self.config["no_fly_threshold"])).sum())
@@ -401,6 +471,9 @@ class CentralizedMultiUAVEnv(gym.Env):
             "spatial_scale": self.runtime_params["spatial_scale"],
             "max_step_distance": self.runtime_params["max_speed"] * float(self.config["dt"]),
         }
+        # Task reward owns goal/coverage/formation/risk objective terms; common
+        # reward owns cross-task costs such as collisions, path length, time, and
+        # no-fly-zone violations.
         task_result = self.current_task.compute_reward(self.current_task_state, prev_state, self.state, transition_info)
         if "formation_error" in task_result.metrics:
             self.state["formation_error_history"].append(task_result.metrics["formation_error"])
@@ -433,6 +506,8 @@ class CentralizedMultiUAVEnv(gym.Env):
         return np.zeros((0, 2), dtype=np.float32)
 
     def _build_info(self, task_success: bool, task_metrics: dict, reward_components: dict, reward: float) -> dict:
+        """Assemble metrics for logging, evaluation CSVs, and visualizers."""
+
         collision_rate = self.state["collision_count"] / max(self.state["step_count"] * self.num_agents, 1)
         path_length_per_agent = self.state["path_length"] / max(self.num_agents, 1)
         risk_exposure_per_agent = self.state["risk_exposure"] / max(self.num_agents, 1)

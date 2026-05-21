@@ -7,6 +7,13 @@ from policies.action_distribution import SquashedNormal
 
 
 class CNNAttentionPolicy(nn.Module):
+    """Centralized policy that lets field/task/agent tokens attend jointly.
+
+    Compared with CNNDeepSets, this architecture keeps per-agent tokens in a
+    Transformer encoder, so agents can condition on one another directly instead
+    of only through a pooled summary. It is more expressive, but heavier.
+    """
+
     def __init__(
         self,
         observation_space,
@@ -19,6 +26,8 @@ class CNNAttentionPolicy(nn.Module):
         super().__init__()
         cnn_channels = cnn_channels or [16, 32, 64]
         in_channels = observation_space["task_field"].shape[0]
+        # The field image is compressed to one token, then projected to the same
+        # embedding dimension as task/global and agent tokens.
         conv_layers = []
         last_channels = in_channels
         for out_channels in cnn_channels:
@@ -34,6 +43,7 @@ class CNNAttentionPolicy(nn.Module):
         agent_input_dim = observation_space["agents"].shape[-1]
         task_dim = int(observation_space["task_id"].shape[0])
         global_dim = int(observation_space["global_info"].shape[0])
+        # Token layout is: [field_token, task_global_token, agent_0, ..., agent_N].
         self.agent_proj = nn.Linear(agent_input_dim, embed_dim)
         self.task_proj = nn.Linear(task_dim + global_dim, embed_dim)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -54,6 +64,8 @@ class CNNAttentionPolicy(nn.Module):
         return None
 
     def forward(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode all tokens and return per-agent action means plus value."""
+
         batch_size, num_agents, _ = obs["agents"].shape
         field_token = self.field_proj(self.field_encoder(obs["task_field"])).unsqueeze(1)
         task_token = self.task_proj(torch.cat([obs["task_id"], obs["global_info"]], dim=-1)).unsqueeze(1)
@@ -63,6 +75,8 @@ class CNNAttentionPolicy(nn.Module):
         agent_mask = self._agent_mask(obs)
         key_padding_mask = None
         if agent_mask is not None:
+            # Transformer padding masks use True for positions to ignore. The
+            # first two prefix tokens are always valid.
             prefix = torch.zeros((batch_size, 2), dtype=torch.bool, device=agent_mask.device)
             key_padding_mask = torch.cat([prefix, ~agent_mask], dim=1)
         encoded = self.encoder(tokens, src_key_padding_mask=key_padding_mask)
@@ -70,11 +84,14 @@ class CNNAttentionPolicy(nn.Module):
         mean = torch.tanh(self.actor_head(encoded_agents))
         if agent_mask is not None:
             mean = mean * agent_mask.unsqueeze(-1).float()
+        # Critic value is based on global prefix tokens, not on a single agent.
         state_token = encoded[:, :2, :].mean(dim=1)
         value = self.value_head(state_token).squeeze(-1)
         return mean, value
 
     def get_action_and_value(self, obs: dict[str, torch.Tensor], action: torch.Tensor | None = None):
+        """Return action, joint log-prob, entropy, and critic value."""
+
         mean, value = self(obs)
         std = self.log_std.exp().view(1, 1, 2).expand_as(mean)
         dist = SquashedNormal(mean, std)
@@ -85,6 +102,8 @@ class CNNAttentionPolicy(nn.Module):
                 action = action.view(mean.shape[0], mean.shape[1], 2)
             bounded_action = torch.clamp(action, -1.0, 1.0)
             raw_action = dist.atanh(bounded_action)
+        # Sum over action dimensions, then over valid agents to form the joint
+        # action likelihood used by centralized PPO.
         log_prob = dist.log_prob(bounded_action, raw_action=raw_action, reduce=False).sum(dim=-1)
         entropy = dist.entropy_estimate(bounded_action, raw_action=raw_action, reduce=False).sum(dim=-1)
         agent_mask = self._agent_mask(obs)

@@ -233,3 +233,17 @@ Reason:
 
 - task-combination sweeps need repeatable sequential execution without manually starting every PPO run
 - per-row parameters make it practical to debug different task mixes and hyperparameter variants while keeping the existing PPO training contract
+
+## Theme Q: Core code explanatory comments
+
+Implemented:
+
+- added explanatory docstrings and comments to `envs/centralized_env.py` around centralized environment setup, observation/action contracts, runtime scaling, state initialization, task-field composition, transition stepping, collision handling, reward composition, and info metrics
+- added comments to `algorithms/ppo.py` explaining rollout storage, reward normalization, critic bootstrap, GAE, minibatch flattening, clipped PPO ratios, and loss components
+- added neural-network comments to `policies/cnn_deepsets_policy.py`, `policies/attention_policy.py`, and `policies/mlp_policy.py` describing architecture roles, variable-N handling, token/pooling logic, and centralized value/action heads
+- added distribution comments to `policies/action_distribution.py` explaining tanh-squashed Gaussian actions and log-prob change-of-variables correction
+
+Reason:
+
+- future readers need the environment, algorithm, and policy framework to be understandable without reverse-engineering every tensor transformation
+- comments document intent and contracts only; no algorithm semantics or training outputs were changed

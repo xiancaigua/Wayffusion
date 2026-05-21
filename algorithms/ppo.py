@@ -14,12 +14,16 @@ from utils.profiling import get_memory_usage_mb, measure_policy_latency_ms
 
 
 class RunningMeanStd:
+    """Online scalar normalizer used for PPO reward normalization."""
+
     def __init__(self, epsilon: float = 1e-4):
         self.mean = 0.0
         self.var = 1.0
         self.count = epsilon
 
     def update(self, values: np.ndarray) -> None:
+        """Merge one rollout reward batch into the running mean/variance."""
+
         values = np.asarray(values, dtype=np.float32)
         batch_mean = float(values.mean())
         batch_var = float(values.var())
@@ -40,6 +44,12 @@ class RunningMeanStd:
 
 @dataclass
 class PPOBatch:
+    """One PPO rollout after GAE/return computation.
+
+    Time and vector-env dimensions are kept separate here. The update step later
+    flattens them into a single batch dimension for shuffled minibatches.
+    """
+
     observations: dict[str, np.ndarray]
     actions: np.ndarray
     logprobs: np.ndarray
@@ -51,6 +61,8 @@ class PPOBatch:
 
 
 class RolloutBuffer:
+    """Temporary storage for one on-policy rollout horizon."""
+
     def __init__(self):
         self.obs: list[dict[str, np.ndarray]] = []
         self.actions: list[np.ndarray] = []
@@ -60,6 +72,8 @@ class RolloutBuffer:
         self.values: list[np.ndarray] = []
 
     def add(self, obs, action, logprob, reward, done, value):
+        # Copy arrays at collection time because vector environments reuse and
+        # mutate their current observation buffers between steps.
         self.obs.append({k: np.asarray(v, dtype=np.float32).copy() for k, v in obs.items()})
         self.actions.append(np.asarray(action, dtype=np.float32).copy())
         self.logprobs.append(np.asarray(logprob, dtype=np.float32).copy())
@@ -82,6 +96,13 @@ class RolloutBuffer:
 
 
 class PPOTrainer:
+    """Minimal PPO trainer for centralized multi-UAV policies.
+
+    The trainer is intentionally framework-light: it expects a synchronous
+    vectorized environment batch, a policy implementing `get_action_and_value`,
+    and config fields for rollout length, GAE, clipping, and optimizer settings.
+    """
+
     def __init__(self, env_batch, policy: nn.Module, train_config: dict, device: str | None = None):
         self.env_batch = env_batch
         self.policy = policy
@@ -95,16 +116,22 @@ class PPOTrainer:
         self.completed_episodes = 0
 
     def set_env_batch(self, env_batch) -> None:
+        """Swap vectorized envs for variable-N training and reset observations."""
+
         self.env_batch = env_batch
         self.current_obs, _ = self.env_batch.reset()
 
     def _flatten_time_env(self, array: np.ndarray) -> np.ndarray:
+        """Collapse [time, env, ...] into [time * env, ...] for minibatches."""
+
         return array.reshape(array.shape[0] * array.shape[1], *array.shape[2:])
 
     def _flatten_obs(self, observations: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         return {key: self._flatten_time_env(value) for key, value in observations.items()}
 
     def _set_lr(self, update_idx: int, total_updates: int) -> None:
+        """Apply optional linear learning-rate annealing across PPO updates."""
+
         if self.train_config.get("lr_schedule", "constant") != "linear":
             return
         frac = 1.0 - ((update_idx - 1.0) / max(total_updates, 1))
@@ -113,6 +140,14 @@ class PPOTrainer:
             param_group["lr"] = lr
 
     def collect_rollout(self) -> tuple[PPOBatch, dict]:
+        """Collect one on-policy rollout and compute GAE advantages.
+
+        PPO requires fresh samples from the current policy. For each environment
+        step we store the sampled action, its old log-prob, the critic value, and
+        the normalized reward. After the horizon, a final critic bootstrap value
+        is used to compute generalized advantage estimates backward in time.
+        """
+
         horizon = int(self.train_config["rollout_steps"])
         gamma = float(self.train_config["gamma"])
         gae_lambda = float(self.train_config["gae_lambda"])
@@ -146,6 +181,9 @@ class PPOTrainer:
             self.global_step += self.env_batch.num_envs
         self.completed_episodes += completed_episodes
         with torch.no_grad():
+            # Bootstrap from the critic at the observation following the rollout.
+            # This keeps truncated rollouts from treating the horizon as zero
+            # value when the episode is still alive.
             next_value = self.policy.get_action_and_value(
                 observation_to_tensor(self.current_obs, self.device, already_batched=True)
             )[3].cpu().numpy()
@@ -156,6 +194,8 @@ class PPOTrainer:
         advantages = np.zeros_like(rewards)
         gae = np.zeros((rewards.shape[1],), dtype=np.float32)
         for t in reversed(range(horizon)):
+            # GAE recursively mixes one-step TD error with longer-horizon
+            # estimates. done masks stop credit assignment across episode resets.
             mask = 1.0 - dones[t]
             delta = rewards[t] + gamma * values[t + 1] * mask - values[t]
             gae = delta + gamma * gae_lambda * mask * gae
@@ -173,6 +213,14 @@ class PPOTrainer:
         }
 
     def update(self, batch: PPOBatch) -> dict:
+        """Run clipped PPO optimization over one collected rollout.
+
+        The old log-probabilities in the batch are fixed targets from rollout
+        collection. The update recomputes log-probs under the current policy and
+        clips the probability ratio so a single minibatch cannot move the policy
+        too far from the behavior policy that generated the data.
+        """
+
         advantages = batch.advantages.copy()
         if self.train_config.get("advantage_norm", True):
             advantages = (advantages - advantages.mean()) / max(advantages.std(), 1e-8)
@@ -200,11 +248,15 @@ class PPOTrainer:
                 mb_returns = torch.as_tensor(flat_returns[mb_idx], dtype=torch.float32, device=self.device)
 
                 _, new_logprob, entropy, value = self.policy.get_action_and_value(obs_tensors, actions)
+                # PPO surrogate objective: ratio > 1 means the current policy
+                # makes the sampled action more likely than the rollout policy.
                 ratio = torch.exp(new_logprob - old_logprob)
                 clip_coef = float(self.train_config["clip_coef"])
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
                 policy_loss = torch.max(pg_loss1, pg_loss2).mean()
+                # Actor, critic, and entropy terms are kept explicit so logged
+                # metrics map directly to the PPO paper's components.
                 value_loss = 0.5 * ((value - mb_returns) ** 2).mean()
                 entropy_loss = entropy.mean()
                 loss = policy_loss + float(self.train_config["vf_coef"]) * value_loss - float(self.train_config["ent_coef"]) * entropy_loss
