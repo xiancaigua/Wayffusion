@@ -10,7 +10,7 @@ from .evaluation import (
     make_fixed_task_eval_config,
 )
 from .profiling import get_memory_usage_mb, measure_policy_latency_ms
-from .vector_env import SyncEnvBatch, make_env_batch
+from .vector_env import SyncEnvBatch, ThreadEnvBatch, make_env_batch, make_task_balanced_env_batch
 
 __all__ = [
     "ExpertDataset",
@@ -27,5 +27,7 @@ __all__ = [
     "get_memory_usage_mb",
     "measure_policy_latency_ms",
     "SyncEnvBatch",
+    "ThreadEnvBatch",
     "make_env_batch",
+    "make_task_balanced_env_batch",
 ]

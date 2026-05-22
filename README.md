@@ -149,6 +149,20 @@ For sequential PPO sweeps over editable task combinations with email notificatio
 bash scripts/run_ppo_task_queue.sh
 ```
 
+For the full PPO multi-task suite, including one specialist policy per task and selected multi-task policies:
+
+```bash
+bash scripts/run_ppo_multitask_suite.sh
+```
+
+To enable QQ/Foxmail SMTP notifications for queue scripts, copy and edit the local secret file:
+
+```bash
+mkdir -p .secrets
+cp configs/examples/wayffusion_mail.env.example .secrets/wayffusion_mail.env
+NOTIFY_ONLY=1 bash scripts/run_ppo_multitask_suite.sh
+```
+
 View TensorBoard for training runs:
 
 ```powershell

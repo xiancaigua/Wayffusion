@@ -7,22 +7,46 @@ cd "${REPO_ROOT}"
 
 export MPLBACKEND="${MPLBACKEND:-Agg}"
 
-# -----------------------------------------------------------------------------
-# Sequential PPO task queue
+# =============================================================================
+# PPO multi-task training suite
+# =============================================================================
+# Purpose:
+# - Train a dedicated PPO policy for each single task.
+# - Train additional PPO policies for selected multi-task combinations.
+# - Run jobs sequentially so one GPU can execute a full suite unattended.
+# - Send an email summary when the queue finishes.
 #
-# Edit this block for normal use. Each enabled row below launches one independent
-# PPO training run. Fields are separated by "|":
+# Each enabled row starts a fresh independent train_ppo.py run. That means the
+# single-task rows below produce specialized policies, not shared checkpoints.
 #
+# Queue row format, separated by "|":
 # enabled | run_label | tasks | agent_counts | total_updates | eval_episodes |
-# record_eval_episodes | record_interval | cuda_visible_devices | extra_args
+# record_eval_episodes | record_interval | env_backend | envs_per_task |
+# env_workers | cuda_visible_devices | extra_args
 #
-# Notes:
-# - tasks: space-separated task names, for example "goal_nav coverage".
-# - record_interval counts evaluation passes, not updates. With eval_interval=25
-#   in the default config, record_interval=4 saves GIFs every 100 updates.
-# - extra_args can be empty, or contain train_ppo.py arguments such as:
-#   --scaling_mode density_preserving --obs_variant single_channel_field
-# -----------------------------------------------------------------------------
+# Important parameters to edit:
+# - CONFIG: PPO/policy config file.
+# - ENV_CONFIG: base environment config.
+# - SCALING_MODE: fixed_map or density_preserving.
+# - OBS_VARIANT: observation ablation variant.
+# - TARGET_EPISODES: 0 means stop by total_updates.
+# - RECORD_FORMAT / RECORD_FPS: gif/mp4 recording settings.
+# - CONSOLE_LOG_INTERVAL: stdout progress cadence.
+# - CONTINUE_ON_FAILURE: 0 stops at first failed run, 1 keeps going.
+# - EMAIL_TO: completion notification recipient. Set empty to disable email.
+# - DEFAULT_* values: used when a queue row leaves a field empty.
+# - DEFAULT_CUDA_VISIBLE_DEVICES inherits an externally supplied
+#   CUDA_VISIBLE_DEVICES, so commands like
+#   CUDA_VISIBLE_DEVICES=5 bash scripts/run_ppo_multitask_suite.sh
+#   run the queue on physical GPU 5 when row GPU fields are empty.
+# - QUEUE rows: per-run task mix and per-run hyperparameters.
+#
+# Backend guidance:
+# - env_backend=sync is the safest debug baseline.
+# - env_backend=thread can improve rollout sampling throughput.
+# - envs_per_task creates task-balanced batches. For single-task specialist
+#   policies, it simply creates multiple fixed-task envs for that one task.
+# =============================================================================
 
 # Email notification configuration.
 # Sensitive values should be provided by environment variables or by an ignored
@@ -56,31 +80,33 @@ RECORD_FPS="${RECORD_FPS:-8}"
 CONSOLE_LOG_INTERVAL="${CONSOLE_LOG_INTERVAL:-10}"
 CONTINUE_ON_FAILURE="${CONTINUE_ON_FAILURE:-0}"
 
-# Long enough for meaningful debugging runs without being as expensive as full
-# paper-scale sweeps. Raise per row when a combination looks promising.
-DEFAULT_TOTAL_UPDATES="2000"
+# Defaults used by empty queue fields.
+DEFAULT_AGENT_COUNTS="4"
+DEFAULT_TOTAL_UPDATES="20000"
 DEFAULT_EVAL_EPISODES="5"
 DEFAULT_RECORD_EVAL_EPISODES="1"
 DEFAULT_RECORD_INTERVAL="4"
-DEFAULT_AGENT_COUNTS="4"
-DEFAULT_CUDA_VISIBLE_DEVICES="0"
+DEFAULT_ENV_BACKEND="thread"
+DEFAULT_ENVS_PER_TASK="6"
+DEFAULT_ENV_WORKERS="16"
+DEFAULT_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-# Default queue: singles, representative pairs, triples, and all-task training.
-# Add, remove, or duplicate rows to run multiple hyperparameter variants.
+# Default suite:
+# - The first four rows are specialist single-task policies.
+# - Remaining rows are multi-task policies for comparison.
+# - To disable a row, change its first field from 1 to 0.
+# - To add a hyperparameter variant, duplicate a row and change label/fields.
 QUEUE=(
-  "1|single_goal_nav|goal_nav|4|2000|5|1|4|0|"
-  "1|single_coverage|coverage|4|2000|5|1|4|0|"
-  "1|single_formation|formation|4|2000|5|1|4|0|"
-  "1|single_risk_nav|risk_nav|4|2000|5|1|4|0|"
-  "1|pair_goal_coverage|goal_nav coverage|4|2000|5|1|4|0|"
-  "1|pair_goal_formation|goal_nav formation|4|2000|5|1|4|0|"
-  "1|pair_coverage_risk|coverage risk_nav|4|2000|5|1|4|0|"
-  "1|triple_goal_coverage_formation|goal_nav coverage formation|4|2000|5|1|4|0|"
-  "1|all_tasks|goal_nav coverage formation risk_nav|4|2500|5|1|4|0|"
+  "1|specialist_goal_nav|goal_nav|4|20000|5|1|4|thread|4|16||"
+  "1|specialist_coverage|coverage|4|20000|5|1|4|thread|4|16||"
+  "1|specialist_formation|formation|4|20000|5|1|4|thread|4|16||"
+  "1|specialist_risk_nav|risk_nav|4|20000|5|1|4|thread|4|16||"
+  "1|multi_goal_coverage|goal_nav coverage|4|25000|5|1|4|thread|4|16||"
+  "1|multi_goal_formation|goal_nav formation|4|25000|5|1|4|thread|4|16||"
+  "1|multi_coverage_risk|coverage risk_nav|4|25000|5|1|4|thread|4|16||"
 )
-
 RUN_QUEUE_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-QUEUE_LOG_ROOT="${QUEUE_LOG_ROOT:-outputs/training/task_queue/${RUN_QUEUE_TIMESTAMP}}"
+QUEUE_LOG_ROOT="${QUEUE_LOG_ROOT:-outputs/training/ppo/${RUN_QUEUE_TIMESTAMP}}"
 mkdir -p "${QUEUE_LOG_ROOT}"
 QUEUE_LOG="${QUEUE_LOG_ROOT}/queue.log"
 SUMMARY_CSV="${QUEUE_LOG_ROOT}/summary.csv"
@@ -110,10 +136,6 @@ notify_email() {
   fi
 
   if [[ -n "${SMTP_HOST:-}" ]]; then
-    if [[ "${SMTP_ALLOW_NO_AUTH:-0}" != "1" && ( -z "${SMTP_USER:-}" || -z "${SMTP_PASSWORD:-}" ) ]]; then
-      log "email not sent: SMTP_HOST is set but SMTP_USER or SMTP_PASSWORD is empty; for QQ mail use an SMTP authorization code"
-      return 1
-    fi
     SMTP_HOST="${SMTP_HOST}" SMTP_PORT="${SMTP_PORT:-587}" SMTP_USER="${SMTP_USER:-}" SMTP_PASSWORD="${SMTP_PASSWORD:-}" SMTP_FROM="${SMTP_FROM:-}" SMTP_SSL="${SMTP_SSL:-0}" SMTP_STARTTLS="${SMTP_STARTTLS:-1}" EMAIL_TO="${to}" EMAIL_SUBJECT="${subject}" EMAIL_BODY="${body}" python - <<'PYMAIL'
 from __future__ import annotations
 
@@ -171,13 +193,13 @@ PYMAIL
 }
 
 write_summary_header() {
-  printf 'label,status,exit_code,start_time,end_time,duration_sec,tasks,agent_counts,total_updates,eval_episodes,record_eval_episodes,record_interval,cuda_visible_devices,log_path\n' > "${SUMMARY_CSV}"
+  printf 'label,status,exit_code,start_time,end_time,duration_sec,tasks,agent_counts,total_updates,eval_episodes,record_eval_episodes,record_interval,env_backend,envs_per_task,env_workers,cuda_visible_devices,log_path\n' > "${SUMMARY_CSV}"
 }
 
 append_summary() {
-  local label="$1" status="$2" exit_code="$3" start_time="$4" end_time="$5" duration_sec="$6" tasks="$7" agent_counts="$8" total_updates="$9" eval_episodes="${10}" record_eval_episodes="${11}" record_interval="${12}" cuda_visible_devices="${13}" log_path="${14}"
-  printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
-    "${label}" "${status}" "${exit_code}" "${start_time}" "${end_time}" "${duration_sec}" "${tasks}" "${agent_counts}" "${total_updates}" "${eval_episodes}" "${record_eval_episodes}" "${record_interval}" "${cuda_visible_devices}" "${log_path}" >> "${SUMMARY_CSV}"
+  local label="$1" status="$2" exit_code="$3" start_time="$4" end_time="$5" duration_sec="$6" tasks="$7" agent_counts="$8" total_updates="$9" eval_episodes="${10}" record_eval_episodes="${11}" record_interval="${12}" env_backend="${13}" envs_per_task="${14}" env_workers="${15}" cuda_visible_devices="${16}" log_path="${17}"
+  printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' \
+    "${label}" "${status}" "${exit_code}" "${start_time}" "${end_time}" "${duration_sec}" "${tasks}" "${agent_counts}" "${total_updates}" "${eval_episodes}" "${record_eval_episodes}" "${record_interval}" "${env_backend}" "${envs_per_task}" "${env_workers}" "${cuda_visible_devices}" "${log_path}" >> "${SUMMARY_CSV}"
 }
 
 write_summary_header
@@ -187,10 +209,11 @@ log "config=${CONFIG}"
 log "env_config=${ENV_CONFIG}"
 log "scaling_mode=${SCALING_MODE}"
 log "obs_variant=${OBS_VARIANT}"
+log "target_episodes=${TARGET_EPISODES}"
 
 if [[ "${NOTIFY_ONLY}" == "1" ]]; then
-  subject="[Wayffusion] PPO task queue notification test"
-  body="This is a notification-only test from scripts/run_ppo_task_queue.sh.
+  subject="[Wayffusion] PPO multitask suite notification test"
+  body="This is a notification-only test from scripts/run_ppo_multitask_suite.sh.
 
 repo_root=${REPO_ROOT}
 queue_log_root=${QUEUE_LOG_ROOT}
@@ -211,7 +234,7 @@ completed_runs=0
 skipped_runs=0
 
 for row in "${QUEUE[@]}"; do
-  IFS='|' read -r enabled label tasks agent_counts total_updates eval_episodes record_eval_episodes record_interval cuda_visible_devices extra_args <<< "${row}"
+  IFS='|' read -r enabled label tasks agent_counts total_updates eval_episodes record_eval_episodes record_interval env_backend envs_per_task env_workers cuda_visible_devices extra_args <<< "${row}"
 
   enabled="${enabled:-0}"
   label="${label:-unnamed}"
@@ -221,6 +244,9 @@ for row in "${QUEUE[@]}"; do
   eval_episodes="${eval_episodes:-${DEFAULT_EVAL_EPISODES}}"
   record_eval_episodes="${record_eval_episodes:-${DEFAULT_RECORD_EVAL_EPISODES}}"
   record_interval="${record_interval:-${DEFAULT_RECORD_INTERVAL}}"
+  env_backend="${env_backend:-${DEFAULT_ENV_BACKEND}}"
+  envs_per_task="${envs_per_task:-${DEFAULT_ENVS_PER_TASK}}"
+  env_workers="${env_workers:-${DEFAULT_ENV_WORKERS}}"
   cuda_visible_devices="${cuda_visible_devices:-${DEFAULT_CUDA_VISIBLE_DEVICES}}"
   extra_args="${extra_args:-}"
 
@@ -233,7 +259,7 @@ for row in "${QUEUE[@]}"; do
   run_start_epoch="$(date +%s)"
   run_start_time="$(date --iso-8601=seconds)"
   run_log="${QUEUE_LOG_ROOT}/${label}.log"
-  log "start ${label}: tasks=${tasks}; agent_counts=${agent_counts}; total_updates=${total_updates}; cuda=${cuda_visible_devices}"
+  log "start ${label}: tasks=${tasks}; updates=${total_updates}; backend=${env_backend}; envs_per_task=${envs_per_task}; workers=${env_workers}; cuda=${cuda_visible_devices}"
 
   cmd=(
     python scripts/train_ppo.py
@@ -251,6 +277,9 @@ for row in "${QUEUE[@]}"; do
     --record_fps "${RECORD_FPS}"
     --record_interval "${record_interval}"
     --console_log_interval "${CONSOLE_LOG_INTERVAL}"
+    --env_backend "${env_backend}"
+    --envs_per_task "${envs_per_task}"
+    --env_workers "${env_workers}"
     --run_timestamp "${RUN_QUEUE_TIMESTAMP}"
     --run_name "${label}"
     --headless
@@ -273,24 +302,24 @@ for row in "${QUEUE[@]}"; do
 
   if [[ "${exit_code}" == "0" ]]; then
     completed_runs=$((completed_runs + 1))
-    append_summary "${label}" "success" "${exit_code}" "${run_start_time}" "${run_end_time}" "${duration_sec}" "${tasks}" "${agent_counts}" "${total_updates}" "${eval_episodes}" "${record_eval_episodes}" "${record_interval}" "${cuda_visible_devices}" "${run_log}"
+    append_summary "${label}" "success" "${exit_code}" "${run_start_time}" "${run_end_time}" "${duration_sec}" "${tasks}" "${agent_counts}" "${total_updates}" "${eval_episodes}" "${record_eval_episodes}" "${record_interval}" "${env_backend}" "${envs_per_task}" "${env_workers}" "${cuda_visible_devices}" "${run_log}"
     log "finish ${label}: success duration_sec=${duration_sec}"
   else
     failed_runs=$((failed_runs + 1))
     queue_status="failed"
-    append_summary "${label}" "failed" "${exit_code}" "${run_start_time}" "${run_end_time}" "${duration_sec}" "${tasks}" "${agent_counts}" "${total_updates}" "${eval_episodes}" "${record_eval_episodes}" "${record_interval}" "${cuda_visible_devices}" "${run_log}"
+    append_summary "${label}" "failed" "${exit_code}" "${run_start_time}" "${run_end_time}" "${duration_sec}" "${tasks}" "${agent_counts}" "${total_updates}" "${eval_episodes}" "${record_eval_episodes}" "${record_interval}" "${env_backend}" "${envs_per_task}" "${env_workers}" "${cuda_visible_devices}" "${run_log}"
     log "finish ${label}: failed exit_code=${exit_code} duration_sec=${duration_sec}"
     if [[ "${CONTINUE_ON_FAILURE}" != "1" ]]; then
       log "stopping queue because CONTINUE_ON_FAILURE=${CONTINUE_ON_FAILURE}"
       break
     fi
   fi
- done
+done
 
 queue_end_epoch="$(date +%s)"
 queue_duration_sec=$((queue_end_epoch - queue_start_epoch))
-subject="[Wayffusion] PPO task queue ${queue_status}: ${completed_runs} completed, ${failed_runs} failed"
-body="Wayffusion PPO task queue finished.
+subject="[Wayffusion] PPO multitask suite ${queue_status}: ${completed_runs} completed, ${failed_runs} failed"
+body="Wayffusion PPO multitask suite finished.
 
 status=${queue_status}
 completed_runs=${completed_runs}

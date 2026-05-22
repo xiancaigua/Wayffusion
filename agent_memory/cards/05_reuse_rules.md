@@ -33,6 +33,17 @@ Preconditions:
 - server media and checkpoints should continue using the existing run layout under `outputs/training/<algorithm>/<timestamp>/<run_name>/`
 - for long Linux all-task PPO training, prefer `bash scripts/run_ppo_all_tasks_long.sh`; edit the top-level `DEFAULT_*` block for persistent run settings, or override `TOTAL_UPDATES`, `CUDA_VISIBLE_DEVICES`, `AGENT_COUNTS`, `EVAL_EPISODES`, or `RECORD_INTERVAL` from the shell for one-off runs
 - for sequential PPO task-combination sweeps, prefer `bash scripts/run_ppo_task_queue.sh`; edit the queue rows at the top of the file so every task combination can carry its own training/evaluation/GIF/GPU settings
+- for PPO comparisons between single-task specialist policies and multi-task policies, prefer `bash scripts/run_ppo_multitask_suite.sh`; keep the four specialist rows enabled unless intentionally running an ablation
+- use `NOTIFY_ONLY=1` with queue scripts to test email notification before long runs; a container needs either SMTP env vars or local `mail` / `mailx` / `sendmail`
+- for QQ/Foxmail notifications, copy `configs/examples/wayffusion_mail.env.example` to `.secrets/wayffusion_mail.env` and store the SMTP authorization code there, never in a tracked script
+- PPO run directories now use compact task tags and omit `obs_variant`; use `snapshot/cli_args.yaml`, `snapshot/env_config.yaml`, and metrics CSV metadata for full provenance
+- PPO queue scripts group child runs as `outputs/training/ppo/<queue_timestamp>/<run_label>/...` by passing `--run_timestamp` and `--run_name` to `train_ppo.py`
+- `SyncEnvBatch` remains the serial debug baseline and the default training backend
+- `ThreadEnvBatch` is the threaded rollout backend for ordinary multi-env batches; opt in with `--env_backend thread`
+- task-balanced rollout batches should be built with `--envs_per_task <K>` when a training run needs fixed per-task environment counts rather than stochastic task sampling
+- large-scale diffusion/data-collection style runs should prefer task-balanced thread batches after a sync smoke check, while visualization, GIF debugging, and human-render diagnosis should keep `--env_backend sync`
+- PPO queue scripts should leave per-row GPU fields empty when launch-time GPU selection is desired; then `CUDA_VISIBLE_DEVICES=<id> bash scripts/run_ppo_multitask_suite.sh` selects the physical GPU for the whole queue
+- non-empty per-row GPU fields intentionally override the inherited `CUDA_VISIBLE_DEVICES` and should only be used when different queue rows must target different devices
 
 ## Config layer
 

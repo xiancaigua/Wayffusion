@@ -227,6 +227,7 @@ Implemented:
 - each queue row has its own label, task list, agent counts, update budget, eval episodes, GIF recording cadence, GPU selection, and extra CLI args
 - queue runs remain headless, use TensorBoard, preserve `outputs/training/ppo/<timestamp>/<run_name>/`, and write queue logs under `outputs/training/task_queue/<timestamp>/`
 - completion notification targets `muadib@foxmail.com` by default and supports SMTP env vars or local `mail` / `mailx` / `sendmail`
+- `NOTIFY_ONLY=1` can now be used to test the notification path without starting training
 - README now includes the queue launcher entrypoint
 
 Reason:
@@ -247,3 +248,97 @@ Reason:
 
 - future readers need the environment, algorithm, and policy framework to be understandable without reverse-engineering every tensor transformation
 - comments document intent and contracts only; no algorithm semantics or training outputs were changed
+
+## Theme R: Threaded environment batch backend
+
+Implemented:
+
+- added `ThreadEnvBatch` beside `SyncEnvBatch` in `utils/vector_env.py`, using `ThreadPoolExecutor` while preserving the same `envs`, `num_envs`, `reset(...)`, and `step(actions)` interface
+- kept `SyncEnvBatch` behavior unchanged as the serial debug baseline
+- extended `make_env_batch(...)` with `backend="sync|thread"` and optional `max_workers`
+- added `make_task_balanced_env_batch(...)` to create a fixed number of environments per task with deterministic per-env seeds
+- exported `ThreadEnvBatch` and `make_task_balanced_env_batch` through `utils/__init__.py`
+- added `--env_backend`, `--envs_per_task`, and `--env_workers` to PPO, SAC, and TD3 training entrypoints
+- added tests for threaded reset/step shape, ordered result collection, done-time auto reset, task-balanced env counts, forced task assignment, and task-balanced thread stepping
+
+Reason:
+
+- rollout collection was previously serialized over environment instances, which limits throughput when environment work dominates policy inference
+- task-balanced batches make multi-task rollout sampling explicit by creating equal fixed-task environment groups instead of relying only on stochastic task sampling
+- default backend remains `sync`, so all existing training commands preserve their old behavior unless a caller opts into `thread`
+
+## Theme S: PPO multi-task suite launcher with specialist policies
+
+Implemented:
+
+- added `scripts/run_ppo_multitask_suite.sh` as a dedicated PPO experiment suite launcher
+- the suite explicitly trains four independent specialist policies: `goal_nav`, `coverage`, `formation`, and `risk_nav`
+- the suite also trains selected multi-task policies for pairs, triples, and all four tasks
+- important tunables are listed at the top of the script, including config paths, scaling mode, observation variant, total updates, eval episodes, GIF cadence, env backend, task-balanced env count, thread workers, GPU id, and email settings
+- each queue row carries its own task mix and training/evaluation/backend/GPU parameters
+- queue logs and summary CSVs are written under `outputs/training/ppo_multitask_suite/<timestamp>/`, while training artifacts preserve the standard `outputs/training/ppo/<timestamp>/<run_name>/` layout
+- `NOTIFY_ONLY=1` can now be used to test the suite notification path without running the queue
+
+Reason:
+
+- comparing specialist single-task policies with multi-task policies requires running both families under one repeatable queue
+- keeping all important parameters visible in the script makes server-side experiment editing practical without changing trainer code
+
+## Theme T: Shorter PPO run directory names
+
+Implemented:
+
+- shortened `scripts/train_ppo.py` run names from `<config>_<full_task_names>_N<agents>_<obs_variant>` to `<config>_<compact_task_tag>_N<agents>`
+- compact task tags use `goal`, `cov`, `form`, `risk`, and `all4` for the canonical four-task set
+- removed observation variant from the PPO run directory name because it is already saved in `snapshot/cli_args.yaml`
+
+Reason:
+
+- long PPO run directory names were cumbersome on server runs and nested output paths
+- the removed fields are still recoverable from run snapshots and CSV metadata, so shortening the directory name does not remove experiment provenance
+
+## Theme U: Queue-level PPO output grouping
+
+Implemented:
+
+- added optional `--run_timestamp` and `--run_name` arguments to `scripts/train_ppo.py`
+- `scripts/run_ppo_task_queue.sh` and `scripts/run_ppo_multitask_suite.sh` now pass their launch timestamp to every child PPO run
+- queue row labels are passed as child PPO run names, producing output paths such as `outputs/training/ppo/<queue_timestamp>/<run_label>/...`
+
+Reason:
+
+- a scripted training suite should group all child runs under the script launch time instead of scattering them across many per-run timestamps
+- queue labels are clearer than long auto-generated names when comparing many independent runs from one launch
+
+## Theme V: QQ SMTP notification configuration
+
+Implemented:
+
+- queue scripts now support a QQ SMTP preset with defaults for `smtp.qq.com:465` over SSL
+- sensitive mail values are loaded from environment variables or an ignored local file at `.secrets/wayffusion_mail.env`
+- added `configs/examples/wayffusion_mail.env.example` as the safe template for local SMTP configuration
+- `.gitignore` now excludes `.secrets/` and `wayffusion_mail.env`
+- notification self-test remains available with `NOTIFY_ONLY=1`
+
+Reason:
+
+- email authorization codes must not be committed into scripts
+- QQ/Foxmail SMTP requires an authorization code, so scripts now explicitly warn when `SMTP_USER` or `SMTP_PASSWORD` is missing
+
+Follow-up validation:
+
+- fixed SMTP variables loaded from `.secrets/wayffusion_mail.env` so they are explicitly passed into the Python mail sender subprocess
+- verified `NOTIFY_ONLY=1` succeeds for both `scripts/run_ppo_multitask_suite.sh` and `scripts/run_ppo_task_queue.sh`
+
+## Theme W: Queue script GPU selection inheritance
+
+Implemented:
+
+- updated `scripts/run_ppo_multitask_suite.sh` so `DEFAULT_CUDA_VISIBLE_DEVICES` inherits an externally supplied `CUDA_VISIBLE_DEVICES`
+- changed the default suite rows to leave their per-row GPU field empty, allowing commands such as `CUDA_VISIBLE_DEVICES=5 bash scripts/run_ppo_multitask_suite.sh` to run on physical GPU 5
+- kept per-row GPU override support intact; filling the row GPU field still takes precedence over the inherited default
+
+Reason:
+
+- hard-coded per-row `cuda_visible_devices=0` caused external GPU selection to be ignored
+- server users need a simple launch-time way to choose a GPU without editing every queue row

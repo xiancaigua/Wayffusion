@@ -3,3 +3,5 @@
 outputs/
 __pycache__/
 *.py[cod]
+.secrets/
+wayffusion_mail.env

@@ -28,7 +28,7 @@ from scripts._common import (
     timestamped_training_dir,
     write_metrics_csv,
 )
-from utils import evaluate_policy_per_task, make_env_batch
+from utils import evaluate_policy_per_task, make_env_batch, make_task_balanced_env_batch
 
 
 def main():
@@ -48,6 +48,9 @@ def main():
     parser.add_argument("--record_format", choices=["gif", "mp4"], default="gif")
     parser.add_argument("--record_fps", type=int, default=8)
     parser.add_argument("--record_interval", type=int, default=1)
+    parser.add_argument("--env_backend", choices=["sync", "thread"], default="sync")
+    parser.add_argument("--envs_per_task", type=int, default=None)
+    parser.add_argument("--env_workers", type=int, default=None)
     args = parser.parse_args()
 
     task_names = normalize_task_names(args.tasks)
@@ -60,7 +63,21 @@ def main():
         scaling_mode=args.scaling_mode,
         observation_override=observation_override_from_variant(args.obs_variant),
     )
-    env_batch = make_env_batch(env_config, int(config.get("num_envs", 1)))
+    if args.envs_per_task is not None:
+        env_batch = make_task_balanced_env_batch(
+            env_config,
+            task_names=task_names,
+            envs_per_task=args.envs_per_task,
+            backend=args.env_backend,
+            max_workers=args.env_workers,
+        )
+    else:
+        env_batch = make_env_batch(
+            env_config,
+            int(config.get("num_envs", 1)),
+            backend=args.env_backend,
+            max_workers=args.env_workers,
+        )
     policy = build_policy(config, env_batch.envs[0].observation_space, env_batch.envs[0].action_space)
     if args.init_checkpoint:
         checkpoint = torch.load(args.init_checkpoint, map_location="cpu")

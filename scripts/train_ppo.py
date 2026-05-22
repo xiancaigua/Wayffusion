@@ -18,7 +18,6 @@ from scripts._common import (
     build_metric_logger,
     checkpoints_dir,
     format_agent_set_name,
-    format_obs_variant_name,
     format_task_set_name,
     log_scalar_metrics,
     load_generic_config,
@@ -30,7 +29,30 @@ from scripts._common import (
     timestamped_training_dir,
     write_metrics_csv,
 )
-from utils import evaluate_policy_per_task, flatten_task_eval_summaries, make_env_batch
+from utils import evaluate_policy_per_task, flatten_task_eval_summaries, make_env_batch, make_task_balanced_env_batch
+
+
+def compact_task_set_name(task_names: list[str]) -> str:
+    task_aliases = {
+        "goal_nav": "goal",
+        "coverage": "cov",
+        "formation": "form",
+        "risk_nav": "risk",
+    }
+    canonical_all_tasks = {"goal_nav", "coverage", "formation", "risk_nav"}
+    if set(task_names) == canonical_all_tasks and len(task_names) == len(canonical_all_tasks):
+        return "all4"
+    return "_".join(task_aliases.get(task_name, str(task_name)) for task_name in task_names)
+
+
+def safe_run_name(value: str) -> str:
+    keep = []
+    for char in str(value):
+        if char.isalnum() or char in {"-", "_"}:
+            keep.append(char)
+        else:
+            keep.append("_")
+    return "".join(keep).strip("_") or "ppo_run"
 
 
 def main():
@@ -52,11 +74,16 @@ def main():
     parser.add_argument("--record_format", choices=["gif", "mp4"], default="gif")
     parser.add_argument("--record_fps", type=int, default=8)
     parser.add_argument("--record_interval", type=int, default=1)
+    parser.add_argument("--env_backend", choices=["sync", "thread"], default="sync")
+    parser.add_argument("--envs_per_task", type=int, default=None)
+    parser.add_argument("--env_workers", type=int, default=None)
+    parser.add_argument("--run_timestamp", default=None)
+    parser.add_argument("--run_name", default=None)
     args = parser.parse_args()
 
     task_names = normalize_task_names(args.tasks)
-    agent_counts = [int(n) for n in args.agent_counts]
     train_config = load_generic_config(args.config)
+    agent_counts = [int(n) for n in args.agent_counts]
     if args.total_updates is not None:
         train_config["total_updates"] = int(args.total_updates)
     if args.target_episodes is not None:
@@ -73,17 +100,34 @@ def main():
         scaling_mode=args.scaling_mode,
         observation_override=observation_override_from_variant(args.obs_variant),
     )
-    env_build = make_env_batch(base_env_config, int(train_config.get("num_envs", 1)))
+    if args.envs_per_task is not None:
+        env_build = make_task_balanced_env_batch(
+            base_env_config,
+            task_names=task_names,
+            envs_per_task=args.envs_per_task,
+            backend=args.env_backend,
+            max_workers=args.env_workers,
+        )
+    else:
+        env_build = make_env_batch(
+            base_env_config,
+            int(train_config.get("num_envs", 1)),
+            backend=args.env_backend,
+            max_workers=args.env_workers,
+        )
     policy = build_policy(train_config, env_build.envs[0].observation_space, env_build.envs[0].action_space)
     trainer = PPOTrainer(env_build, policy, train_config)
     if args.init_checkpoint:
         trainer.load_checkpoint(args.init_checkpoint)
 
     output_root = "bc_ppo" if args.init_checkpoint else "ppo"
-    run_name = f"{train_config['name']}_{format_task_set_name(task_names)}_N{format_agent_set_name(agent_counts)}_{format_obs_variant_name(args.obs_variant)}"
+    run_name = safe_run_name(
+        args.run_name or f"{train_config['name']}_{compact_task_set_name(task_names)}_N{format_agent_set_name(agent_counts)}"
+    )
     output_dir = timestamped_training_dir(
         output_root,
         run_name,
+        timestamp=args.run_timestamp,
     )
     save_run_snapshot(
         output_dir,
@@ -129,15 +173,33 @@ def main():
             )
         else:
             env_batches = {
-                n: make_env_batch(
-                    prepare_env_config(
-                        args.env_config,
-                        tasks=task_names,
-                        num_agents=n,
-                        scaling_mode=args.scaling_mode,
-                        observation_override=observation_override_from_variant(args.obs_variant),
-                    ),
-                    int(train_config.get("num_envs", 1)),
+                n: (
+                    make_task_balanced_env_batch(
+                        prepare_env_config(
+                            args.env_config,
+                            tasks=task_names,
+                            num_agents=n,
+                            scaling_mode=args.scaling_mode,
+                            observation_override=observation_override_from_variant(args.obs_variant),
+                        ),
+                        task_names=task_names,
+                        envs_per_task=args.envs_per_task,
+                        backend=args.env_backend,
+                        max_workers=args.env_workers,
+                    )
+                    if args.envs_per_task is not None
+                    else make_env_batch(
+                        prepare_env_config(
+                            args.env_config,
+                            tasks=task_names,
+                            num_agents=n,
+                            scaling_mode=args.scaling_mode,
+                            observation_override=observation_override_from_variant(args.obs_variant),
+                        ),
+                        int(train_config.get("num_envs", 1)),
+                        backend=args.env_backend,
+                        max_workers=args.env_workers,
+                    )
                 )
                 for n in agent_counts
             }
