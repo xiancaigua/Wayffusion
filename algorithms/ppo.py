@@ -265,6 +265,11 @@ class PPOTrainer:
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.policy.parameters(), float(self.train_config["max_grad_norm"]))
                 self.optimizer.step()
+                if hasattr(self.policy, "log_std"):
+                    log_std_min = float(self.train_config.get("log_std_min", getattr(self.policy, "log_std_min", -1.5)))
+                    log_std_max = float(self.train_config.get("log_std_max", getattr(self.policy, "log_std_max", 0.5)))
+                    with torch.no_grad():
+                        self.policy.log_std.clamp_(log_std_min, log_std_max)
                 stats["policy_loss"] += float(policy_loss.item())
                 stats["value_loss"] += float(value_loss.item())
                 stats["entropy"] += float(entropy_loss.item())

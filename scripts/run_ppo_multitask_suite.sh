@@ -61,6 +61,10 @@ if [[ -f "${SMTP_CONFIG_FILE}" ]]; then
   # shellcheck disable=SC1090
   source "${SMTP_CONFIG_FILE}"
 fi
+PYTHON_BIN="${PYTHON_BIN:-/opt/conda/bin/python}"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="python3"
+fi
 SMTP_PRESET="${SMTP_PRESET:-qq}"
 if [[ "${SMTP_PRESET}" == "qq" ]]; then
   SMTP_HOST="${SMTP_HOST:-smtp.qq.com}"
@@ -136,7 +140,11 @@ notify_email() {
   fi
 
   if [[ -n "${SMTP_HOST:-}" ]]; then
-    SMTP_HOST="${SMTP_HOST}" SMTP_PORT="${SMTP_PORT:-587}" SMTP_USER="${SMTP_USER:-}" SMTP_PASSWORD="${SMTP_PASSWORD:-}" SMTP_FROM="${SMTP_FROM:-}" SMTP_SSL="${SMTP_SSL:-0}" SMTP_STARTTLS="${SMTP_STARTTLS:-1}" EMAIL_TO="${to}" EMAIL_SUBJECT="${subject}" EMAIL_BODY="${body}" python - <<'PYMAIL'
+    if [[ "${SMTP_ALLOW_NO_AUTH:-0}" != "1" && ( -z "${SMTP_USER:-}" || -z "${SMTP_PASSWORD:-}" ) ]]; then
+      log "email not sent: SMTP_HOST is set but SMTP_USER or SMTP_PASSWORD is empty; for QQ/Foxmail use an SMTP authorization code"
+      return 1
+    fi
+    SMTP_HOST="${SMTP_HOST}" SMTP_PORT="${SMTP_PORT:-587}" SMTP_USER="${SMTP_USER:-}" SMTP_PASSWORD="${SMTP_PASSWORD:-}" SMTP_FROM="${SMTP_FROM:-}" SMTP_SSL="${SMTP_SSL:-0}" SMTP_STARTTLS="${SMTP_STARTTLS:-1}" EMAIL_TO="${to}" EMAIL_SUBJECT="${subject}" EMAIL_BODY="${body}" "${PYTHON_BIN}" - <<'PYMAIL'
 from __future__ import annotations
 
 import os
@@ -262,7 +270,7 @@ for row in "${QUEUE[@]}"; do
   log "start ${label}: tasks=${tasks}; updates=${total_updates}; backend=${env_backend}; envs_per_task=${envs_per_task}; workers=${env_workers}; cuda=${cuda_visible_devices}"
 
   cmd=(
-    python scripts/train_ppo.py
+    "${PYTHON_BIN}" scripts/train_ppo.py
     --config "${CONFIG}"
     --env-config "${ENV_CONFIG}"
     --tasks ${tasks}

@@ -75,3 +75,18 @@ class SquashedNormal:
         reduce: bool = True,
     ) -> torch.Tensor:
         return -self.log_prob(action, raw_action=raw_action, reduce=reduce)
+
+    def base_entropy(self, reduce: bool = True) -> torch.Tensor:
+        """Return the Gaussian entropy before tanh squashing.
+
+        This is a stable exploration diagnostic and PPO bonus. The exact tanh
+        entropy depends on an expectation over samples; using old PPO actions
+        as that expectation can become negative and push training in the wrong
+        direction when the policy saturates.
+        """
+
+        entropy = self.base_dist.entropy()
+        if not reduce:
+            return entropy
+        reduce_dims = tuple(range(1, entropy.ndim))
+        return entropy.sum(dim=reduce_dims) if reduce_dims else entropy

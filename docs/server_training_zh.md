@@ -31,6 +31,16 @@ docker run --gpus all -it \
 cd /workspace/Wayffusion/Wayffusion
 ```
 
+在当前服务器上，已验证可用的 Python 解释器是：
+
+```bash
+export PYTHON_BIN=/opt/conda/bin/python
+export CUDA_VISIBLE_DEVICES=0
+export MPLBACKEND=Agg
+```
+
+其中 GPU 0/1/3 通常空闲，GPU 2 可能已有其他训练任务。需要换卡时只改 `CUDA_VISIBLE_DEVICES`。
+
 ## 2. 代理验证
 
 宿主机上先确认代理监听和外网连通：
@@ -58,7 +68,7 @@ pip install -r requirements.txt
 原因是通用文件包含 `torch>=2.9`，会触发 pip 尝试升级 torch，破坏镜像内置 CUDA 组合。服务器应使用：
 
 ```bash
-pip install -r requirements-server.txt
+${PYTHON_BIN:-python} -m pip install -r requirements-server.txt
 ```
 
 `requirements-server.txt` 只包含训练、评估、测试和可视化所需的非 torch 依赖，包括 `psutil`、`tensorboard`、`pytest`、`gymnasium`、`matplotlib`、`imageio` 等。
@@ -68,7 +78,7 @@ pip install -r requirements-server.txt
 运行：
 
 ```bash
-python - <<'PY'
+${PYTHON_BIN:-python} - <<'PY'
 import torch
 
 print("torch:", torch.__version__)
@@ -83,7 +93,7 @@ PY
 也可以使用仓库脚本做更完整的环境检查：
 
 ```bash
-python scripts/server/check_server_env.py
+${PYTHON_BIN:-python} scripts/check/server/check_server_env.py
 ```
 
 ## 5. Smoke test
@@ -91,38 +101,29 @@ python scripts/server/check_server_env.py
 先跑单元测试：
 
 ```bash
-pytest tests/
+${PYTHON_BIN:-python} -m pytest tests/
 ```
 
 再生成任务场和基础 rollout 图：
 
 ```bash
-python scripts/check/generate_task_fields.py --config configs/env/multitask.yaml
+${PYTHON_BIN:-python} scripts/check/generate_task_fields.py --config configs/env/multitask.yaml
 ```
 
 这些输出写入 `outputs/smoke/...`。
 
-## 6. 最小 PPO 训练验证
+## 6. 最小训练验证
 
 推荐先跑极短 PPO 训练，确认 checkpoint、TensorBoard 和 GIF 录像都能写入：
 
 ```bash
-bash scripts/server/smoke_train_ppo.sh
+PYTHON_BIN=/opt/conda/bin/python CUDA_VISIBLE_DEVICES=0 bash scripts/check/server/smoke_train_ppo.sh
 ```
 
-等价命令为：
+如果要一次覆盖 PPO、SAC、TD3、BC 以及测试、专家数据生成、checkpoint、metrics 和 TensorBoard 日志写出，使用：
 
 ```bash
-python scripts/train_ppo.py \
-  --config configs/policy/ppo_cnn_deepsets.yaml \
-  --tasks goal_nav coverage \
-  --agent_counts 4 \
-  --total_updates 2 \
-  --target_episodes 0 \
-  --eval_episodes 1 \
-  --record_eval_episodes 1 \
-  --record_format gif \
-  --console_log_interval 1
+PYTHON_BIN=/opt/conda/bin/python CUDA_VISIBLE_DEVICES=0 bash scripts/check/server/smoke_train_all.sh
 ```
 
 训练输出保持项目既有结构：
@@ -149,7 +150,7 @@ tensorboard --logdir outputs/training --host 127.0.0.1 --port 6006
 或使用脚本：
 
 ```bash
-bash scripts/server/start_tensorboard.sh
+TENSORBOARD_BIN=/opt/conda/bin/tensorboard bash scripts/check/server/start_tensorboard.sh
 ```
 
 本地机器建立 SSH 转发：

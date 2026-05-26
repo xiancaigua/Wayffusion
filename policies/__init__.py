@@ -30,6 +30,12 @@ def build_policy(policy_config: dict, observation_space, action_space):
             cnn_channels=policy_config.get("cnn_channels"),
             agent_hidden_dim=int(policy_config.get("agent_hidden_dim", 64)),
             joint_hidden_dim=int(policy_config.get("joint_hidden_dim", 256)),
+            decoder_hidden_dim=int(policy_config.get("decoder_hidden_dim", 128)),
+            use_spatial_attention=bool(policy_config.get("use_spatial_attention", False)),
+            spatial_pool_size=int(policy_config.get("spatial_pool_size", 8)),
+            attention_heads=int(policy_config.get("attention_heads", 4)),
+            log_std_min=float(policy_config.get("log_std_min", -1.5)),
+            log_std_max=float(policy_config.get("log_std_max", 0.5)),
         )
     if policy_class == "attention":
         return CNNAttentionPolicy(
