@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from fields.field_utils import gaussian_map, sample_points
 from tasks.base_task import BaseTask, TaskStepResult
@@ -24,6 +25,8 @@ class RiskAwareNavigationTask(BaseTask):
             "goals": goals,
             "goal_reached": np.zeros((num_goals,), dtype=bool),
             "goal_progress": self._goal_cost(goals, env_state["positions"]),
+            "last_goal_coverage_ratio": 0.0,
+            "success_bonus_paid": False,
             "goal_reward_map": gaussian_map(
                 goals,
                 env_state["grid_size"],
@@ -36,36 +39,67 @@ class RiskAwareNavigationTask(BaseTask):
         return {"goal_reward": task_state["goal_reward_map"]}
 
     def compute_reward(self, task_state, prev_env_state, env_state, transition_info) -> TaskStepResult:
+        previous_goal_cost = float(task_state["goal_progress"])
         goal_cost = self._goal_cost(task_state["goals"], env_state["positions"])
-        progress = task_state["goal_progress"] - goal_cost
+        progress = previous_goal_cost - goal_cost
         task_state["goal_progress"] = goal_cost
 
         distances = np.linalg.norm(
             env_state["positions"][:, None, :] - task_state["goals"][None, :, :], axis=-1
         )
-        newly_reached = (~task_state["goal_reached"]) & (
-            distances.min(axis=0) <= self.config["goal_radius"] * env_state.get("spatial_scale", 1.0)
-        )
+        goal_radius = self.config["goal_radius"] * env_state.get("spatial_scale", 1.0)
+        newly_reached = (~task_state["goal_reached"]) & (distances.min(axis=0) <= goal_radius)
         task_state["goal_reached"] |= newly_reached
-        goal_count = max(len(task_state["goals"]), 1)
-        completion_ratio = float(newly_reached.sum()) / float(goal_count)
+        coverage_ratio = float(task_state["goal_reached"].mean()) if len(task_state["goal_reached"]) else 0.0
+        previous_coverage_ratio = float(task_state.get("last_goal_coverage_ratio", 0.0))
+        coverage_delta = max(coverage_ratio - previous_coverage_ratio, 0.0)
+        task_state["last_goal_coverage_ratio"] = coverage_ratio
+
+        repeated_goal = 0
+        if task_state["goal_reached"].any():
+            reached_distances = distances[:, task_state["goal_reached"]]
+            per_goal_counts = (reached_distances <= goal_radius).sum(axis=0)
+            repeated_goal = int(np.maximum(per_goal_counts - 1, 0).sum())
+        repeated_ratio = float(repeated_goal) / float(max(env_state["num_agents"], 1))
+        mean_goal_distance = float(distances.min(axis=0).mean()) if len(task_state["goals"]) else 0.0
+        normalized_distance = mean_goal_distance / max(float(env_state.get("map_size", 1.0)), 1e-6)
+        normalized_progress = float(np.clip(progress / max(goal_radius, 1e-6), -2.0, 2.0))
         mean_risk_exposure = float(transition_info["step_risk_exposure"]) / float(max(env_state["num_agents"], 1))
 
         weights = self.config["reward_weights"]["risk_nav"]
-        reward = (
-            weights["progress"] * float(progress)
-            + weights["goal_reached"] * completion_ratio
-            + weights["risk_exposure"] * mean_risk_exposure
-        )
         metrics = self.get_metrics(task_state, env_state)
+        success_bonus = 0.0
+        if bool(metrics["success"]) and not bool(task_state.get("success_bonus_paid", False)):
+            success_bonus = float(weights.get("success_bonus", 0.0))
+            task_state["success_bonus_paid"] = True
+
+        progress_reward = float(weights["progress"] * normalized_progress)
+        completion_reward = float(weights["goal_reached"] * coverage_delta)
+        coverage_reward = float(weights.get("coverage", 0.0) * coverage_ratio)
+        distance_penalty = float(weights.get("distance", 0.0) * normalized_distance)
+        risk_task_penalty = float(weights["risk_exposure"] * mean_risk_exposure)
+        repeated_penalty = float(weights.get("repeated_goal", 0.0) * repeated_ratio)
+        reward = (
+            progress_reward
+            + completion_reward
+            + coverage_reward
+            + distance_penalty
+            + risk_task_penalty
+            + repeated_penalty
+            + success_bonus
+        )
         return TaskStepResult(
             reward=reward,
             success=bool(metrics["success"]),
             metrics=metrics,
             components={
-                "task_progress_reward": weights["progress"] * float(progress),
-                "task_completion_reward": weights["goal_reached"] * completion_ratio,
-                "risk_task_penalty": weights["risk_exposure"] * mean_risk_exposure,
+                "task_progress_reward": progress_reward,
+                "task_completion_reward": completion_reward,
+                "task_coverage_reward": coverage_reward,
+                "task_distance_penalty": distance_penalty,
+                "risk_task_penalty": risk_task_penalty,
+                "task_repeated_penalty": repeated_penalty,
+                "task_success_bonus": success_bonus,
             },
         )
 
@@ -87,4 +121,13 @@ class RiskAwareNavigationTask(BaseTask):
         if len(goals) == 0 or len(positions) == 0:
             return 0.0
         distances = np.linalg.norm(positions[:, None, :] - goals[None, :, :], axis=-1)
-        return float(distances.min(axis=1).mean())
+        if distances.shape[0] <= distances.shape[1]:
+            rows, cols = linear_sum_assignment(distances)
+            assigned = distances[rows, cols].sum()
+            if distances.shape[1] > distances.shape[0]:
+                assigned += distances.min(axis=0).sum() - distances[:, cols].min(axis=0).sum()
+            denom = max(max(distances.shape[0], distances.shape[1]), 1)
+            return float(assigned / denom)
+        rows, cols = linear_sum_assignment(distances.T)
+        denom = max(max(distances.shape[0], distances.shape[1]), 1)
+        return float(distances.T[rows, cols].sum() / denom)

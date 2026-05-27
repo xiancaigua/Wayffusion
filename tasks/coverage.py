@@ -38,7 +38,9 @@ class CoverageTask(BaseTask):
             "target_probability": target_probability,
             "coverage_demand": coverage_demand,
             "required_visits": required_visits,
-            "last_visited_score": 0.0,
+            "last_coverage_ratio": 0.0,
+            "last_detection_score": 0.0,
+            "success_bonus_paid": False,
             "total_repeated": 0.0,
             "total_detected": 0.0,
         }
@@ -70,21 +72,35 @@ class CoverageTask(BaseTask):
         task_state["total_repeated"] += repeated_mask.sum()
         task_state["total_detected"] += detection_gain
 
-        weights = self.config["reward_weights"]["coverage"]
-        reward = (
-            weights["new_coverage"] * new_coverage
-            + weights["high_probability"] * detection_gain
-            + weights["repeated_coverage"] * repeated_ratio
-        )
         metrics = self.get_metrics(task_state, env_state)
+        previous_coverage_ratio = float(task_state.get("last_coverage_ratio", 0.0))
+        previous_detection_score = float(task_state.get("last_detection_score", 0.0))
+        coverage_delta = max(float(metrics["coverage_ratio"]) - previous_coverage_ratio, 0.0)
+        detection_delta = max(float(metrics["accumulated_detection_probability"]) - previous_detection_score, 0.0)
+        task_state["last_coverage_ratio"] = float(metrics["coverage_ratio"])
+        task_state["last_detection_score"] = float(metrics["accumulated_detection_probability"])
+
+        weights = self.config["reward_weights"]["coverage"]
+        success_bonus = 0.0
+        if bool(metrics["success"]) and not bool(task_state.get("success_bonus_paid", False)):
+            success_bonus = float(weights.get("success_bonus", 0.0))
+            task_state["success_bonus_paid"] = True
+
+        coverage_reward = float(weights["new_coverage"] * max(new_coverage, coverage_delta))
+        detection_reward = float(weights["high_probability"] * max(detection_gain, detection_delta))
+        coverage_level_reward = float(weights.get("coverage_level", 0.0) * float(metrics["coverage_ratio"]))
+        repeated_penalty = float(weights["repeated_coverage"] * repeated_ratio)
+        reward = coverage_reward + detection_reward + coverage_level_reward + repeated_penalty + success_bonus
         return TaskStepResult(
             reward=reward,
             success=bool(metrics["success"]),
             metrics=metrics,
             components={
-                "coverage_reward": weights["new_coverage"] * new_coverage,
-                "detection_reward": weights["high_probability"] * detection_gain,
-                "repeated_coverage_penalty": weights["repeated_coverage"] * repeated_ratio,
+                "coverage_reward": coverage_reward,
+                "detection_reward": detection_reward,
+                "coverage_level_reward": coverage_level_reward,
+                "repeated_coverage_penalty": repeated_penalty,
+                "coverage_success_bonus": success_bonus,
             },
         )
 

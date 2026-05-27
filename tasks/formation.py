@@ -35,6 +35,7 @@ class FormationTask(BaseTask):
             "radius": radius,
             "slots": slots,
             "last_error": self._formation_error(env_state["positions"], slots),
+            "success_bonus_paid": False,
         }
 
     def step_update(self, task_state, env_state) -> None:
@@ -82,30 +83,46 @@ class FormationTask(BaseTask):
 
     def compute_reward(self, task_state, prev_env_state, env_state, transition_info) -> TaskStepResult:
         error = self._formation_error(env_state["positions"], task_state["slots"])
-        progress = task_state["last_error"] - error
+        progress = float(task_state["last_error"] - error)
         task_state["last_error"] = error
 
         angular_uniformity = self._angular_uniformity(env_state["positions"], task_state["target_position"])
         radius_error = self._radius_error(env_state["positions"], task_state["target_position"], task_state["radius"])
         stability = 1.0 / (1.0 + float(np.std(env_state["formation_error_history"][-5:] or [error])))
+        scale = max(float(task_state["radius"]), 1e-6)
+        max_step_distance = max(float(transition_info.get("max_step_distance", scale)), 1e-6)
+        normalized_progress = float(np.clip(progress / max_step_distance, -5.0, 5.0))
+        normalized_error = float(error / scale)
+        normalized_radius_error = float(radius_error / scale)
+        proximity = float(1.0 / (1.0 + normalized_error + normalized_radius_error))
+
         weights = self.config["reward_weights"]["formation"]
         radius_penalty_weight = self._radius_penalty_weight()
-        reward = (
-            weights["error_reduction"] * progress
-            + weights["angular_coverage"] * angular_uniformity
-            - radius_penalty_weight * radius_error
-            + weights["stability"] * stability
-        )
         metrics = self.get_metrics(task_state, env_state)
+        success_bonus = 0.0
+        if bool(metrics["success"]) and not bool(task_state.get("success_bonus_paid", False)):
+            success_bonus = float(weights.get("success_bonus", 0.0))
+            task_state["success_bonus_paid"] = True
+
+        formation_reward = float(weights["error_reduction"] * normalized_progress)
+        error_penalty = float(-abs(weights.get("error_penalty", 0.0)) * normalized_error)
+        angular_reward = float(weights["angular_coverage"] * angular_uniformity)
+        radius_penalty = float(-radius_penalty_weight * normalized_radius_error)
+        stability_reward = float(weights.get("stability", 0.0) * stability)
+        proximity_reward = float(weights.get("slot_proximity", 0.0) * proximity)
+        reward = formation_reward + error_penalty + angular_reward + radius_penalty + stability_reward + proximity_reward + success_bonus
         return TaskStepResult(
             reward=reward,
             success=bool(metrics["success"]),
             metrics=metrics,
             components={
-                "formation_reward": weights["error_reduction"] * progress,
-                "angular_reward": weights["angular_coverage"] * angular_uniformity,
-                "radius_penalty": -radius_penalty_weight * radius_error,
-                "stability_reward": weights["stability"] * stability,
+                "formation_reward": formation_reward,
+                "formation_error_penalty": error_penalty,
+                "angular_reward": angular_reward,
+                "radius_penalty": radius_penalty,
+                "stability_reward": stability_reward,
+                "slot_proximity_reward": proximity_reward,
+                "formation_success_bonus": success_bonus,
             },
         )
 

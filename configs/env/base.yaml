@@ -76,26 +76,38 @@ task_sets:
   four_task: [goal_nav, coverage, formation, risk_nav]
 reward_weights:
   common:
-    collision: -1.5
-    obstacle_collision: -1.2
-    path_length: -0.08
-    time: -0.02
-    safety_violation: -1.4
-    risk: -0.5
+    collision: -0.12
+    obstacle_collision: -0.18
+    path_length: -0.01
+    time: -0.005
+    safety_violation: -0.2
+    risk: -0.05
   goal_nav:
-    progress: 1.2
-    goal_reached: 2.5
-    repeated_goal: -0.3
+    progress: 0.8
+    goal_reached: 4.0
+    coverage: 0.08
+    distance: -0.05
+    repeated_goal: -0.05
+    success_bonus: 8.0
   coverage:
-    new_coverage: 2.0
-    high_probability: 1.5
-    repeated_coverage: -0.4
+    new_coverage: 8.0
+    high_probability: 4.0
+    coverage_level: 0.25
+    repeated_coverage: -0.08
+    success_bonus: 10.0
   formation:
-    error_reduction: 2.0
-    angular_coverage: 0.9
-    radius_error_penalty: 0.8
-    stability: 0.4
+    error_reduction: 0.8
+    error_penalty: 0.1
+    angular_coverage: 0.08
+    radius_error_penalty: 0.08
+    stability: 0.0
+    slot_proximity: 0.12
+    success_bonus: 8.0
   risk_nav:
     progress: 1.0
-    goal_reached: 2.4
-    risk_exposure: -0.9
+    goal_reached: 5.0
+    coverage: 0.08
+    distance: -0.05
+    repeated_goal: -0.05
+    risk_exposure: -0.12
+    success_bonus: 8.0

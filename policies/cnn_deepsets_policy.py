@@ -44,6 +44,7 @@ class CNNDeepSetsPolicy(nn.Module):
         attention_heads: int = 4,
         log_std_min: float = -1.5,
         log_std_max: float = 0.5,
+        log_std_init: float = 0.0,
     ):
         super().__init__()
         cnn_channels = cnn_channels or [16, 32, 64]
@@ -104,7 +105,8 @@ class CNNDeepSetsPolicy(nn.Module):
             nn.Linear(decoder_hidden_dim, 2),
         )
         self.value_head = nn.Linear(joint_hidden_dim, 1)
-        self.log_std = nn.Parameter(torch.zeros(2))
+        init_log_std = float(min(max(log_std_init, self.log_std_min), self.log_std_max))
+        self.log_std = nn.Parameter(torch.full((2,), init_log_std))
 
     def _agent_mask(self, obs: dict[str, torch.Tensor]) -> torch.Tensor | None:
         if "agent_mask" in obs:

@@ -51,6 +51,8 @@ def main():
     parser.add_argument("--env_backend", choices=["sync", "thread"], default="sync")
     parser.add_argument("--envs_per_task", type=int, default=None)
     parser.add_argument("--env_workers", type=int, default=None)
+    parser.add_argument("--run_timestamp", default=None)
+    parser.add_argument("--run_name", default=None)
     args = parser.parse_args()
 
     task_names = normalize_task_names(args.tasks)
@@ -84,8 +86,8 @@ def main():
         policy.load_state_dict(checkpoint["model_state_dict"], strict=False)
     trainer = SACTrainer(env_batch, policy, config)
     output_root = "bc_sac" if args.init_checkpoint else "sac"
-    run_name = f"{config['name']}_{format_task_set_name(task_names)}_N{format_agent_set_name([agent_count])}_{format_obs_variant_name(args.obs_variant)}"
-    output_dir = timestamped_training_dir(output_root, run_name)
+    run_name = args.run_name or f"{config['name']}_{format_task_set_name(task_names)}_N{format_agent_set_name([agent_count])}_{format_obs_variant_name(args.obs_variant)}"
+    output_dir = timestamped_training_dir(output_root, run_name, timestamp=args.run_timestamp)
     save_run_snapshot(
         output_dir,
         train_config=config,

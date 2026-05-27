@@ -36,6 +36,7 @@ def build_policy(policy_config: dict, observation_space, action_space):
             attention_heads=int(policy_config.get("attention_heads", 4)),
             log_std_min=float(policy_config.get("log_std_min", -1.5)),
             log_std_max=float(policy_config.get("log_std_max", 0.5)),
+            log_std_init=float(policy_config.get("log_std_init", 0.0)),
         )
     if policy_class == "attention":
         return CNNAttentionPolicy(

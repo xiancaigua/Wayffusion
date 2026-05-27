@@ -155,9 +155,20 @@ def main():
             "eval_success_rate",
         ],
     )
+    metrics_csv_path = output_dir / "training_metrics.csv"
+    metrics_flush_interval = max(int(args.console_log_interval), 1)
 
     try:
         if not variable_n:
+            persisted_history: list[dict] = []
+
+            def log_and_persist(record: dict) -> None:
+                persisted_history.append(dict(record))
+                log_record(record)
+                update_idx = int(record.get("update", 0))
+                if update_idx % metrics_flush_interval == 0 or "checkpoint_path" in record:
+                    write_metrics_csv(persisted_history, metrics_csv_path)
+
             history = trainer.train(
                 output_dir,
                 eval_env=env_build.envs[0],
@@ -169,8 +180,10 @@ def main():
                 record_format=args.record_format,
                 record_fps=args.record_fps,
                 record_interval=args.record_interval,
-                log_callback=log_record,
+                log_callback=log_and_persist,
             )
+            if persisted_history:
+                history = persisted_history
         else:
             env_batches = {
                 n: (
@@ -290,9 +303,12 @@ def main():
                     record["checkpoint_path"] = str(checkpoint_path)
                 history.append(record)
                 log_record(record)
-                if target_episodes > 0 and trainer.completed_episodes >= target_episodes:
+                should_stop = target_episodes > 0 and trainer.completed_episodes >= target_episodes
+                if update_idx % metrics_flush_interval == 0 or "checkpoint_path" in record or should_stop:
+                    write_metrics_csv(history, metrics_csv_path)
+                if should_stop:
                     break
-        write_metrics_csv(history, output_dir / "training_metrics.csv")
+        write_metrics_csv(history, metrics_csv_path)
 
         eval_records = []
         final_update = int(history[-1].get("update", 0)) if history else 0
