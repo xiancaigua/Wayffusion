@@ -133,6 +133,7 @@ def evaluate_policy_episodes(
         total_reward = 0.0
         step_count = 0
         inference_times = []
+        reward_component_totals: dict[str, float] = {}
         rollout_start = time.perf_counter()
         info = dict(reset_info)
         task_name = str(info.get("task_name", getattr(getattr(env, "current_task", None), "name", "episode")))
@@ -154,6 +155,11 @@ def evaluate_policy_episodes(
             if not deterministic:
                 action = np.clip(action + np.random.normal(scale=0.1, size=action.shape), -1.0, 1.0)
             observation, reward, terminated, truncated, info = env.step(action)
+            for key, value in info.get("reward_components", {}).items():
+                if isinstance(value, (int, float, np.floating, np.integer)):
+                    reward_component_totals[f"episode_reward_{key}"] = (
+                        reward_component_totals.get(f"episode_reward_{key}", 0.0) + float(value)
+                    )
             if not headless:
                 env.render(mode="human")
             if should_record:
@@ -187,6 +193,7 @@ def evaluate_policy_episodes(
             "num_agents": int(info.get("num_agents", env.config["num_agents"])),
             "scaling_mode": info.get("scaling_mode", env.config.get("scaling_mode", "fixed_map")),
             **flatten_reward_components(info),
+            **reward_component_totals,
         }
         if recording_path is not None:
             record["recording_path"] = str(recording_path)

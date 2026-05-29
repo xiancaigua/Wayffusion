@@ -59,6 +59,44 @@ def test_goal_nav_progress_reward_is_positive_when_agents_move_closer():
     assert result.components["task_progress_reward"] > 0.0
 
 
+def test_goal_nav_progress_ignores_goals_already_reached():
+    env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "goal_nav", "num_agents": 2}))
+    env.reset(seed=5)
+    task = env.current_task
+    prev_state = env._snapshot_state()
+    env_state = env._snapshot_state()
+    goals = np.asarray([[0.2, 0.2], [0.8, 0.8]], dtype=np.float32)
+    previous_positions = np.asarray([[0.2, 0.2], [0.72, 0.8]], dtype=np.float32)
+    env_state["positions"] = np.asarray([[0.3, 0.3], [0.73, 0.8]], dtype=np.float32)
+    task_state = {
+        **deepcopy(env.current_task_state),
+        "goals": goals,
+        "goal_reached": np.asarray([True, False], dtype=bool),
+        "goal_progress": task._goal_cost(goals[1:], previous_positions),
+        "last_goal_coverage_ratio": 0.5,
+        "success_bonus_paid": False,
+    }
+
+    result = task.compute_reward(
+        task_state,
+        prev_state,
+        env_state,
+        {
+            "pair_collision_count": 0,
+            "obstacle_collision_count": 0,
+            "path_length_delta": 0.0,
+            "step_risk_exposure": 0.0,
+            "step_safety_violations": 0,
+            "num_agents": env.num_agents,
+            "spatial_scale": env.runtime_params["spatial_scale"],
+            "max_step_distance": env.runtime_params["max_speed"] * float(env.config["dt"]),
+        },
+    )
+
+    assert result.components["task_progress_reward"] > 0.0
+    assert task_state["goal_progress"] == task._goal_cost(goals[1:], env_state["positions"])
+
+
 def test_coverage_new_coverage_component_is_positive():
     env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "coverage"}))
     env.reset(seed=3)

@@ -48,6 +48,7 @@ def main():
     parser.add_argument("--tasks", nargs="+", default=["goal_nav", "coverage"])
     parser.add_argument("--agent_counts", nargs="+", type=int, default=[4])
     parser.add_argument("--dataset", default=None)
+    parser.add_argument("--init_checkpoint", default=None)
     parser.add_argument("--env-config", default="configs/env/multitask.yaml")
     parser.add_argument("--scaling_mode", default="fixed_map")
     parser.add_argument("--obs_variant", default="multi_channel_field+task_id")
@@ -81,6 +82,9 @@ def main():
     build_env = CentralizedMultiUAVEnv(env_config)
     policy = build_policy(policy_config, build_env.observation_space, build_env.action_space)
     trainer = BCTrainer(policy, policy_config)
+    if args.init_checkpoint:
+        checkpoint = torch.load(args.init_checkpoint, map_location=trainer.device)
+        trainer.policy.load_state_dict(checkpoint["model_state_dict"], strict=False)
     run_name = f"{policy_config['name']}_{format_task_set_name(task_names)}_N{format_agent_set_name(agent_counts)}_{format_obs_variant_name(args.obs_variant)}"
     output_dir = timestamped_training_dir("bc", run_name)
     save_run_snapshot(
@@ -89,7 +93,12 @@ def main():
         env_config=env_config,
         cli_args=vars(args),
         model_state_dict=trainer.policy.state_dict(),
-        extra_metadata={"task_names": task_names, "agent_counts": agent_counts, "output_root": "bc"},
+        extra_metadata={
+            "task_names": task_names,
+            "agent_counts": agent_counts,
+            "output_root": "bc",
+            "init_checkpoint": args.init_checkpoint,
+        },
     )
     writer, log_record = build_metric_logger(
         output_dir,

@@ -13,6 +13,15 @@ Helper launcher:
 
 - `scripts/run_multitask_ppo_20k.ps1`
 
+Debug / research helpers:
+
+- `scripts/debug_long/analyze_ppo_run.py`
+- `scripts/debug_long/diagnose_goal_nav_policy.py`
+- `scripts/debug_long/generate_success_expert_dataset.py`
+- `scripts/debug_long/collect_dagger_dataset.py`
+- `scripts/debug_long/collect_success_policy_dataset.py`
+- `scripts/debug_long/generate_coverage_expert_v2_dataset.py`
+
 ## Stop conditions
 
 ### PPO
@@ -31,6 +40,7 @@ For classic PPO update-budget training, pass:
 
 - `SAC` and `TD3` train on environment steps and use config-driven eval intervals
 - `BC` trains on epochs
+- `BC` now supports `--init_checkpoint` for warm-starting from a previous policy
 
 ## Visualization and recording
 
@@ -80,6 +90,57 @@ For variable-`N` PPO training:
 - per-`N` metrics are flattened into keys such as `eval_N4_goal_nav_return`
 - legacy aliases such as `eval_reward` map to the mean overall score across monitored `N`
 
+## Debug-long workflow contract
+
+Long-horizon research debug runs now also use:
+
+- `outputs/debug_long/<timestamp>/`
+- per-experiment markdown records such as `00_audit.md`, `01_*.md`, and summary JSON/CSV artifacts
+- targeted diagnostics for policy alignment, successful-trajectory BC, and DAgger-style dataset collection
+
+These debug artifacts are auxiliary to training outputs, but they are part of the current maintenance workflow and should be kept in sync with code changes.
+
+Current robustness rule for debug data builders:
+
+- success-dataset and dagger-dataset scripts now write `.npz` and JSON sidecars through temporary files plus atomic rename
+- if a connection drop interrupts a run, the final dataset path should remain either valid or absent, not half-written
+
+## Current specialist repair chains
+
+### goal_nav
+
+The current effective repair sequence is:
+
+1. run conservative specialist PPO diagnostics on the standard `configs/env/multitask.yaml` slice
+2. train BC on curated success-heavy goal-nav datasets
+3. collect DAgger-style learner-state relabels when BC+PPO still drifts
+4. warm-start PPO from the latest DAgger BC checkpoint with a tightly clamped `log_std`
+
+Current strongest artifacts:
+
+- DAgger BC:
+  - `outputs/training/bc/20260528_051955/debug_bc_goal_nav_success_goal_nav_N4_multi_channel_field_plus_task_id/`
+- ultra-strict PPO from that BC checkpoint:
+  - `outputs/training/bc_ppo/20260528_goalnav_dagger_finetune_ultra_strict/goalnav_dagger_finetune_ultra_strict/`
+
+### coverage
+
+The current effective exploration path is:
+
+1. run low-entropy controlled PPO from scratch
+2. if a promising checkpoint exists, continue from that checkpoint rather than restarting
+3. only use heuristic BC as a probe, not as the current preferred mainline, unless it clearly exceeds the PPO controlled baseline
+
+Current strongest artifact:
+
+- controlled PPO:
+  - `outputs/training/ppo/20260528_phase2_coverage_controlled/phase2_coverage_controlled/`
+
+Current weak artifact:
+
+- heuristic BC probe:
+  - `outputs/training/bc/20260528_072926/debug_bc_coverage_coverage_N4_multi_channel_field_plus_task_id/`
+
 ## Output directory contract
 
 All training outputs are rooted at:
@@ -98,6 +159,15 @@ Sibling directories under each run:
   - periodic evaluation recordings
 - `final_eval_media/`
   - final evaluation recordings
+
+Best-eval checkpoint behavior:
+
+- PPO now also writes `checkpoints/checkpoint_best_eval.pt` when a new best eval result is observed
+- `best_eval_summary.json` is written in the run root with the corresponding update, eval success, and eval reward
+- the current selection rule is:
+  - maximize `eval_success_rate`
+  - break ties by `eval_reward`
+- `scripts/train_ppo.py` final evaluation now defaults to `--final_eval_source best`, so `eval_metrics.csv` is written from the best-eval checkpoint when available instead of the last weight snapshot
 
 ## Snapshot contents
 

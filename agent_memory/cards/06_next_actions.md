@@ -2,7 +2,31 @@
 
 ## 高优先级
 
-### 1. 刷新正式 verification 文件
+### 1. 转移主线到 coverage specialist 修复
+
+建议：
+
+- 继续 coverage 的 expert-v2 BC -> spatial-head PPO 主线
+- 优先观察 `coverage_ratio` 是否能稳定跨过 `0.5`、`0.6`、再接近 `0.82`
+- 当前 spatial-head PPO 已经把 coverage specialist 推到连续非零 success 区：
+  - update 20/40 都有 `success≈0.10`
+  - `coverage_ratio≈0.67`
+  - `collision≈0.0003~0.0006`
+- final eval 仍回到 `success=0.0`，但 `coverage_ratio≈0.667` 与 `collision≈0.003` 仍远好于旧主线
+- 当前更具体的 coverage 主线是：
+  - `expert-v2 dataset -> spatial-head BC -> spatial-head PPO`
+  - 如果继续推进，优先用成功策略轨迹继续做 success-heavy BC / DAgger，而不是继续单纯加 reward scale
+  - 这条成功轨迹强化链已经做过一轮：success-heavy BC、sector-bias、stronger-repulsion 都没有超过 `phase10`
+  - 因此下一步应升级到真正的 group-level coordination actor，而不是继续做轻量偏置微调
+- canonical heuristic BC 只保留为结构探针，不作为 coverage 主线
+
+原因：
+
+- `goal_nav` 当前已经有一条可复用 specialist 收敛链，并且 PPO final eval 已稳定在 `success_rate_mean=0.8`
+- `coverage` 现在才是剩余的主要阻塞项
+- 可选 `global slot head` 已经接入代码并通过跨任务兼容性测试，因此真正的 group-level actor 分支现在具备可实验条件
+
+### 2. 刷新正式 verification 文件
 
 建议：
 
@@ -12,7 +36,7 @@
 
 - 当前文件已明显陈旧，会误导后续 agent 和用户
 
-### 2. 统一配置命名
+### 3. 统一配置命名
 
 建议：
 
@@ -25,7 +49,7 @@
 
 - 当前重复命名已经进入维护负担区间
 
-### 3. 为评估脚本补 `--latest`
+### 4. 为评估脚本补 `--latest`
 
 建议：
 
@@ -37,7 +61,7 @@
 
 ## 中优先级
 
-### 4. 刷新一次 canonical PPO multitask run
+### 5. 在 coverage 主线稳定后，再刷新 canonical specialist / multitask runs
 
 建议：
 
@@ -48,7 +72,7 @@
 
 - 这样后续所有 agent 都能引用“新结构下的标准 run”
 
-### 5. 为 agent_memory 增加自动生成脚本
+### 6. 为 agent_memory 增加自动生成脚本
 
 建议：
 
@@ -60,13 +84,13 @@
 
 ## 低优先级
 
-### 6. 处理 `sitecustomize.py` 重复
+### 7. 处理 `sitecustomize.py` 重复
 
 建议：
 
 - 明确是否保留双副本
 
-### 7. 历史 outputs 分层归档
+### 8. 历史 outputs 分层归档
 
 建议：
 
@@ -80,7 +104,9 @@
 
 如果后续 agent 需要继续主线开发，建议优先路线是：
 
-1. `verification refresh`
-2. `checkpoint/latest helper`
-3. `config naming cleanup`
-4. `new canonical training run`
+1. `coverage true group-level actor`
+2. `formation best-checkpoint stabilization`
+3. `verification refresh`
+4. `checkpoint/latest helper`
+5. `config naming cleanup`
+6. `new canonical training run`

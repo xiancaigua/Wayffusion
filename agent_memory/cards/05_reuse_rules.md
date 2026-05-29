@@ -27,6 +27,10 @@ Preconditions:
 - the canonical zero-spatial-field ablation name is `no_spatial_field`; `task_id_only` is compatibility-only and should not be described as a pure task-id baseline
 - for PPO, `eval_reward` and `eval_success_rate` should be interpreted as overall summaries; per-task health lives in fields like `eval_goal_nav_*`, `eval_coverage_*`, and final `eval_metrics.csv` per-task rows
 - for variable-`N` PPO, monitor per-`N` keys such as `eval_N4_*`, `eval_N8_*`, ...; the plain `eval_reward` alias is only the cross-`N` overall mean
+- for long research debug, write notes, diagnostics, and summaries under `outputs/debug_long/<timestamp>/` and keep the paired training run under `outputs/training/`
+- `scripts/debug_long/analyze_ppo_run.py`, `scripts/debug_long/diagnose_goal_nav_policy.py`, `scripts/debug_long/generate_success_expert_dataset.py`, and `scripts/debug_long/collect_dagger_dataset.py` are reusable research helpers for the current goal_nav repair loop
+- `scripts/train_bc.py` now accepts `--init_checkpoint`; use it for BC warm-starts and DAgger repair runs
+- `algorithms/ppo.py` clamps action `log_std` after loading a checkpoint, so conservative fine-tunes should still set `log_std_min` and `log_std_max` explicitly
 - for Ubuntu Docker server training on PyTorch images that already include CUDA-enabled torch, install `requirements-server.txt`, not `requirements.txt`, to avoid pip upgrading torch
 - server training should remain headless by default; use `MPLBACKEND=Agg` and avoid `--no-headless` for long runs
 - TensorBoard should read the canonical training root: `outputs/training`
@@ -67,6 +71,15 @@ Rule:
 - if aliases remain, they should be marked as legacy or compatibility entries
 - new experiments should prefer cloning from `configs/examples/` before editing task- or paper-specific run configs in place
 - server deployment docs and scripts should live in `docs/server_training_zh.md` and `scripts/server/` unless a future deployment target needs a separate contract
+- goal-nav recovery work currently relies on the BC -> PPO warm-start path plus DAgger relabeling; reusing those checkpoints should be treated as a research warm-start, not as proof of convergence
+- current best reusable `goal_nav` specialist chain is:
+  - DAgger BC checkpoint root: `outputs/training/bc/20260528_051955/debug_bc_goal_nav_success_goal_nav_N4_multi_channel_field_plus_task_id/`
+  - PPO fine-tune root: `outputs/training/bc_ppo/20260528_goalnav_dagger_finetune_ultra_strict/goalnav_dagger_finetune_ultra_strict/`
+- current best reusable `coverage` specialist checkpoint is still the PPO controlled branch, not the BC branch:
+  - this has now been superseded by the spatial-head branch:
+    - BC warm-start: `outputs/training/bc/20260528_092949/debug_bc_coverage_spatialhead_coverage_N4_multi_channel_field_plus_task_id/`
+    - PPO branch: `outputs/training/bc_ppo/20260528_phase10_coverage_spatialhead_ultra/phase10_coverage_spatialhead_ultra/`
+  - treat the earlier controlled / repulsion / reward-focus runs as exploratory history, not as the preferred coverage checkpoint line
 
 ## Results layer
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -77,6 +78,7 @@ def main():
     parser.add_argument("--env_backend", choices=["sync", "thread"], default="sync")
     parser.add_argument("--envs_per_task", type=int, default=None)
     parser.add_argument("--env_workers", type=int, default=None)
+    parser.add_argument("--final_eval_source", choices=["best", "last"], default="best")
     parser.add_argument("--run_timestamp", default=None)
     parser.add_argument("--run_name", default=None)
     args = parser.parse_args()
@@ -222,6 +224,8 @@ def main():
             eval_interval = int(train_config.get("eval_interval", total_updates))
             rng = np.random.default_rng(int(base_env_config.get("seed", 0)))
             eval_count = 0
+            best_eval_success = float("-inf")
+            best_eval_reward = float("-inf")
             for update_idx in range(1, total_updates + 1):
                 trainer._set_lr(update_idx, total_updates)
                 chosen_n = int(rng.choice(agent_counts))
@@ -301,6 +305,33 @@ def main():
                     checkpoint_path = checkpoints_dir(output_dir) / f"checkpoint_{update_idx:04d}.pt"
                     torch.save({"model_state_dict": trainer.policy.state_dict(), "train_config": train_config}, checkpoint_path)
                     record["checkpoint_path"] = str(checkpoint_path)
+                    eval_success = float(record.get("eval_success_rate", float("-inf")))
+                    eval_reward = float(record.get("eval_reward", float("-inf")))
+                    is_best = False
+                    if eval_success > best_eval_success:
+                        is_best = True
+                    elif eval_success == best_eval_success and eval_reward > best_eval_reward:
+                        is_best = True
+                    if is_best:
+                        best_eval_success = eval_success
+                        best_eval_reward = eval_reward
+                        best_path = checkpoints_dir(output_dir) / "checkpoint_best_eval.pt"
+                        torch.save({"model_state_dict": trainer.policy.state_dict(), "train_config": train_config}, best_path)
+                        record["best_checkpoint_path"] = str(best_path)
+                        (output_dir / "best_eval_summary.json").write_text(
+                            json.dumps(
+                                {
+                                    "update": int(update_idx),
+                                    "eval_success_rate": eval_success,
+                                    "eval_reward": eval_reward,
+                                    "checkpoint_path": str(best_path),
+                                },
+                                indent=2,
+                                sort_keys=True,
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
                 history.append(record)
                 log_record(record)
                 should_stop = target_episodes > 0 and trainer.completed_episodes >= target_episodes
@@ -309,6 +340,13 @@ def main():
                 if should_stop:
                     break
         write_metrics_csv(history, metrics_csv_path)
+
+        final_eval_checkpoint = checkpoints_dir(output_dir) / "checkpoint_best_eval.pt"
+        final_eval_source = "last"
+        if args.final_eval_source == "best" and final_eval_checkpoint.exists():
+            checkpoint = torch.load(final_eval_checkpoint, map_location=trainer.device)
+            trainer.policy.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            final_eval_source = "best"
 
         eval_records = []
         final_update = int(history[-1].get("update", 0)) if history else 0
@@ -356,6 +394,7 @@ def main():
                         "task_set": format_task_set_name(task_names),
                         "task_name": task_name,
                         "eval_group": "per_task",
+                        "final_eval_source": final_eval_source,
                         "num_agents": agent_count,
                         "scaling_mode": args.scaling_mode,
                         "seed": int(eval_env_config.get("seed", 0)),
@@ -381,6 +420,7 @@ def main():
                     "task_set": format_task_set_name(task_names),
                     "task_name": "overall",
                     "eval_group": "overall",
+                    "final_eval_source": final_eval_source,
                     "num_agents": agent_count,
                     "scaling_mode": args.scaling_mode,
                     "seed": int(eval_env_config.get("seed", 0)),

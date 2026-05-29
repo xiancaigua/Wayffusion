@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,6 +115,7 @@ class PPOTrainer:
         self.current_obs, _ = self.env_batch.reset()
         self.global_step = 0
         self.completed_episodes = 0
+        self._clamp_policy_log_std()
 
     def set_env_batch(self, env_batch) -> None:
         """Swap vectorized envs for variable-N training and reset observations."""
@@ -139,6 +141,14 @@ class PPOTrainer:
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
 
+    def _clamp_policy_log_std(self) -> None:
+        if not hasattr(self.policy, "log_std"):
+            return
+        log_std_min = float(self.train_config.get("log_std_min", getattr(self.policy, "log_std_min", -1.5)))
+        log_std_max = float(self.train_config.get("log_std_max", getattr(self.policy, "log_std_max", 0.5)))
+        with torch.no_grad():
+            self.policy.log_std.clamp_(log_std_min, log_std_max)
+
     def collect_rollout(self) -> tuple[PPOBatch, dict]:
         """Collect one on-policy rollout and compute GAE advantages.
 
@@ -153,7 +163,14 @@ class PPOTrainer:
         gae_lambda = float(self.train_config["gae_lambda"])
         buffer = RolloutBuffer()
         rollout_rewards = []
+        rollout_norm_rewards = []
+        rollout_action_abs = []
+        rollout_action_saturation = []
         inference_latencies = []
+        terminal_successes = []
+        terminal_goal_coverages = []
+        terminal_collision_rates = []
+        terminal_path_lengths = []
         start = time.perf_counter()
         completed_episodes = 0
         for _ in range(horizon):
@@ -162,8 +179,18 @@ class PPOTrainer:
             with torch.no_grad():
                 action_tensor, logprob_tensor, _, value_tensor = self.policy.get_action_and_value(obs_tensor)
             actions = action_tensor.cpu().numpy()
+            rollout_action_abs.append(float(np.abs(actions).mean()))
+            rollout_action_saturation.append(float((np.abs(actions) >= 0.95).mean()))
             next_obs, rewards, dones, truncs, infos = self.env_batch.step(actions)
             completed_episodes += int(np.count_nonzero(dones))
+            for info in infos:
+                terminal_info = info.get("terminal_info") if isinstance(info, dict) else None
+                if terminal_info is None:
+                    continue
+                terminal_successes.append(float(terminal_info.get("success", False)))
+                terminal_goal_coverages.append(float(terminal_info.get("goal_coverage_ratio", terminal_info.get("coverage_ratio", 0.0))))
+                terminal_collision_rates.append(float(terminal_info.get("collision_rate", 0.0)))
+                terminal_path_lengths.append(float(terminal_info.get("path_length", 0.0)))
             norm_rewards = rewards.copy()
             if self.train_config.get("reward_norm", True):
                 self.reward_rms.update(rewards)
@@ -177,6 +204,7 @@ class PPOTrainer:
                 value_tensor.cpu().numpy(),
             )
             rollout_rewards.append(rewards.mean())
+            rollout_norm_rewards.append(norm_rewards.mean())
             self.current_obs = next_obs
             self.global_step += self.env_batch.num_envs
         self.completed_episodes += completed_episodes
@@ -202,8 +230,21 @@ class PPOTrainer:
             advantages[t] = gae
         returns = advantages + values[:-1]
         elapsed = time.perf_counter() - start
+        reward_values = np.asarray(rollout_rewards, dtype=np.float32)
+        norm_reward_values = np.asarray(rollout_norm_rewards, dtype=np.float32)
         return buffer.build(advantages, returns), {
-            "mean_rollout_reward": float(np.mean(rollout_rewards)),
+            "mean_rollout_reward": float(np.mean(reward_values)),
+            "rollout_reward_std": float(np.std(reward_values)),
+            "mean_normalized_rollout_reward": float(np.mean(norm_reward_values)),
+            "normalized_rollout_reward_std": float(np.std(norm_reward_values)),
+            "reward_rms_mean": float(self.reward_rms.mean),
+            "reward_rms_std": float(np.sqrt(self.reward_rms.var + 1e-8)),
+            "action_abs_mean": float(np.mean(rollout_action_abs)) if rollout_action_abs else 0.0,
+            "action_saturation_frac": float(np.mean(rollout_action_saturation)) if rollout_action_saturation else 0.0,
+            "rollout_episode_success_rate": float(np.mean(terminal_successes)) if terminal_successes else 0.0,
+            "rollout_terminal_goal_coverage": float(np.mean(terminal_goal_coverages)) if terminal_goal_coverages else 0.0,
+            "rollout_terminal_collision_rate": float(np.mean(terminal_collision_rates)) if terminal_collision_rates else 0.0,
+            "rollout_terminal_path_length": float(np.mean(terminal_path_lengths)) if terminal_path_lengths else 0.0,
             "rollout_steps_per_sec": float(horizon * self.env_batch.num_envs / max(elapsed, 1e-6)),
             "rollout_wall_clock_time": float(elapsed),
             "memory_usage_mb": get_memory_usage_mb(),
@@ -232,8 +273,25 @@ class PPOTrainer:
         batch_size = flat_actions.shape[0]
         epochs = int(self.train_config["epochs"])
         minibatch_size = int(self.train_config["minibatch_size"])
-        stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+        target_kl = float(self.train_config.get("target_kl", 0.0) or 0.0)
+        raw_advantages = batch.advantages.reshape(-1)
+        value_predictions = batch.values.reshape(-1)
+        return_targets = batch.returns.reshape(-1)
+        return_var = float(np.var(return_targets))
+        explained_variance = 0.0
+        if return_var > 1e-8:
+            explained_variance = float(1.0 - np.var(return_targets - value_predictions) / return_var)
+        stats = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy": 0.0,
+            "approx_kl": 0.0,
+            "clip_frac": 0.0,
+            "ratio_mean": 0.0,
+            "grad_norm": 0.0,
+        }
         step_count = 0
+        kl_early_stop = 0.0
         for _ in range(epochs):
             indices = np.random.permutation(batch_size)
             for start in range(0, batch_size, minibatch_size):
@@ -250,7 +308,8 @@ class PPOTrainer:
                 _, new_logprob, entropy, value = self.policy.get_action_and_value(obs_tensors, actions)
                 # PPO surrogate objective: ratio > 1 means the current policy
                 # makes the sampled action more likely than the rollout policy.
-                ratio = torch.exp(new_logprob - old_logprob)
+                logratio = new_logprob - old_logprob
+                ratio = torch.exp(logratio)
                 clip_coef = float(self.train_config["clip_coef"])
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
@@ -263,18 +322,43 @@ class PPOTrainer:
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.policy.parameters(), float(self.train_config["max_grad_norm"]))
+                grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), float(self.train_config["max_grad_norm"]))
                 self.optimizer.step()
-                if hasattr(self.policy, "log_std"):
-                    log_std_min = float(self.train_config.get("log_std_min", getattr(self.policy, "log_std_min", -1.5)))
-                    log_std_max = float(self.train_config.get("log_std_max", getattr(self.policy, "log_std_max", 0.5)))
-                    with torch.no_grad():
-                        self.policy.log_std.clamp_(log_std_min, log_std_max)
+                self._clamp_policy_log_std()
+                with torch.no_grad():
+                    approx_kl = ((ratio - 1.0) - logratio).mean()
+                    clip_frac = ((ratio - 1.0).abs() > clip_coef).float().mean()
                 stats["policy_loss"] += float(policy_loss.item())
                 stats["value_loss"] += float(value_loss.item())
                 stats["entropy"] += float(entropy_loss.item())
+                stats["approx_kl"] += float(approx_kl.item())
+                stats["clip_frac"] += float(clip_frac.item())
+                stats["ratio_mean"] += float(ratio.mean().item())
+                stats["grad_norm"] += float(grad_norm.item())
                 step_count += 1
-        return {key: value / max(step_count, 1) for key, value in stats.items()}
+                if target_kl > 0.0 and float(approx_kl.item()) > target_kl:
+                    kl_early_stop = 1.0
+                    break
+            if kl_early_stop:
+                break
+        result = {key: value / max(step_count, 1) for key, value in stats.items()}
+        result.update(
+            {
+                "advantage_mean": float(np.mean(raw_advantages)),
+                "advantage_std": float(np.std(raw_advantages)),
+                "return_mean": float(np.mean(return_targets)),
+                "return_std": float(np.std(return_targets)),
+                "value_pred_mean": float(np.mean(value_predictions)),
+                "value_pred_std": float(np.std(value_predictions)),
+                "explained_variance": explained_variance,
+                "kl_early_stop": kl_early_stop,
+            }
+        )
+        if hasattr(self.policy, "log_std"):
+            log_std = self.policy.log_std.detach().cpu().numpy()
+            result["log_std_mean"] = float(np.mean(log_std))
+            result["policy_std_mean"] = float(np.mean(np.exp(log_std)))
+        return result
 
     def evaluate(
         self,
@@ -318,6 +402,7 @@ class PPOTrainer:
     def load_checkpoint(self, checkpoint_path: str | Path) -> None:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.policy.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        self._clamp_policy_log_std()
 
     def train(
         self,
@@ -338,6 +423,8 @@ class PPOTrainer:
         checkpoints_dir = output_dir / "checkpoints"
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         metrics_history = []
+        best_eval_success = float("-inf")
+        best_eval_reward = float("-inf")
         total_updates = int(self.train_config["total_updates"])
         target_episodes = int(self.train_config.get("target_episodes", 0) or 0)
         eval_interval = int(self.train_config.get("eval_interval", total_updates))
@@ -400,6 +487,37 @@ class PPOTrainer:
                     checkpoint_path,
                 )
                 record["checkpoint_path"] = str(checkpoint_path)
+                eval_success = float(record.get("eval_success_rate", float("-inf")))
+                eval_reward = float(record.get("eval_reward", float("-inf")))
+                is_best = False
+                if eval_success > best_eval_success:
+                    is_best = True
+                elif eval_success == best_eval_success and eval_reward > best_eval_reward:
+                    is_best = True
+                if is_best:
+                    best_eval_success = eval_success
+                    best_eval_reward = eval_reward
+                    best_path = checkpoints_dir / "checkpoint_best_eval.pt"
+                    torch.save(
+                        {"model_state_dict": self.policy.state_dict(), "train_config": self.train_config},
+                        best_path,
+                    )
+                    record["best_checkpoint_path"] = str(best_path)
+                    summary_path = output_dir / "best_eval_summary.json"
+                    summary_path.write_text(
+                        json.dumps(
+                            {
+                                "update": int(update_idx),
+                                "eval_success_rate": eval_success,
+                                "eval_reward": eval_reward,
+                                "checkpoint_path": str(best_path),
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
             metrics_history.append(record)
             if log_callback is not None:
                 log_callback(record)

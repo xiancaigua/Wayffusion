@@ -40,8 +40,19 @@ class CNNDeepSetsPolicy(nn.Module):
         joint_hidden_dim: int = 256,
         decoder_hidden_dim: int = 128,
         use_spatial_attention: bool = False,
+        use_spatial_action_head: bool = False,
         spatial_pool_size: int = 8,
         attention_heads: int = 4,
+        coordination_repulsion_strength: float = 0.0,
+        spatial_action_strength: float = 0.0,
+        spatial_target_suppression_strength: float = 0.0,
+        spatial_target_suppression_sigma: float = 0.15,
+        use_angular_slot_embeddings: bool = False,
+        slot_embedding_strength: float = 1.0,
+        sector_target_bias_strength: float = 0.0,
+        use_global_slot_head: bool = False,
+        global_slot_strength: float = 0.0,
+        actor_mean_residual_weight: float = 1.0,
         log_std_min: float = -1.5,
         log_std_max: float = 0.5,
         log_std_init: float = 0.0,
@@ -49,9 +60,21 @@ class CNNDeepSetsPolicy(nn.Module):
         super().__init__()
         cnn_channels = cnn_channels or [16, 32, 64]
         self.use_spatial_attention = bool(use_spatial_attention)
+        self.use_spatial_action_head = bool(use_spatial_action_head)
         self.spatial_pool_size = int(spatial_pool_size)
+        self.coordination_repulsion_strength = float(coordination_repulsion_strength)
+        self.spatial_action_strength = float(spatial_action_strength)
+        self.spatial_target_suppression_strength = float(spatial_target_suppression_strength)
+        self.spatial_target_suppression_sigma = float(spatial_target_suppression_sigma)
+        self.use_angular_slot_embeddings = bool(use_angular_slot_embeddings)
+        self.slot_embedding_strength = float(slot_embedding_strength)
+        self.sector_target_bias_strength = float(sector_target_bias_strength)
+        self.use_global_slot_head = bool(use_global_slot_head)
+        self.global_slot_strength = float(global_slot_strength)
+        self.actor_mean_residual_weight = float(actor_mean_residual_weight)
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
+        self.max_slots = int(observation_space["agents"].shape[0])
         in_channels = observation_space["task_field"].shape[0]
         # Strided convolutions compress the fixed-resolution task field while
         # preserving the idea that nearby cells form local spatial patterns.
@@ -75,9 +98,13 @@ class CNNDeepSetsPolicy(nn.Module):
             nn.Linear(agent_hidden_dim, agent_hidden_dim),
             nn.ReLU(),
         )
+        if self.use_angular_slot_embeddings:
+            max_slots = int(observation_space["agents"].shape[0])
+            self.angular_slot_embeddings = nn.Embedding(max_slots, agent_hidden_dim)
         spatial_context_dim = 0
-        if self.use_spatial_attention:
+        if self.use_spatial_attention or self.use_spatial_action_head:
             self.coord_proj = nn.Linear(2, last_channels)
+        if self.use_spatial_attention:
             self.agent_query = nn.Linear(agent_hidden_dim, last_channels)
             self.spatial_attention = nn.MultiheadAttention(
                 embed_dim=last_channels,
@@ -87,6 +114,8 @@ class CNNDeepSetsPolicy(nn.Module):
             spatial_context_dim = last_channels
         task_dim = int(observation_space["task_id"].shape[0])
         global_dim = int(observation_space["global_info"].shape[0])
+        if self.use_spatial_action_head:
+            self.spatial_action_query = nn.Linear(agent_hidden_dim + joint_hidden_dim + task_dim + global_dim, last_channels)
         # The critic sees a global summary, not individual per-agent decisions.
         # This matches the centralized-agent formulation.
         self.state_mlp = nn.Sequential(
@@ -95,6 +124,8 @@ class CNNDeepSetsPolicy(nn.Module):
             nn.Linear(joint_hidden_dim, joint_hidden_dim),
             nn.ReLU(),
         )
+        if self.use_global_slot_head:
+            self.global_slot_head = nn.Linear(joint_hidden_dim, self.max_slots * 2)
         # The actor is decoded per agent from local token + global context. That
         # keeps actions individualized while still coordinated by state_feat.
         self.decoder = nn.Sequential(
@@ -120,16 +151,14 @@ class CNNDeepSetsPolicy(nn.Module):
         field_feat = self.field_global_pool(field_map)
         agent_tokens = self.agent_encoder(obs["agents"])
         agent_mask = self._agent_mask(obs)
+        if self.use_angular_slot_embeddings and self.slot_embedding_strength > 0.0:
+            agent_tokens = agent_tokens + self.slot_embedding_strength * self._angular_slot_features(obs, agent_mask)
+        spatial_tokens = None
+        spatial_coords = None
+        if self.use_spatial_attention or self.use_spatial_action_head:
+            spatial_tokens, spatial_coords = self._build_spatial_tokens(field_map)
         spatial_context = None
         if self.use_spatial_attention:
-            pooled_map = F.adaptive_avg_pool2d(field_map, (self.spatial_pool_size, self.spatial_pool_size))
-            batch_size, channels, height, width = pooled_map.shape
-            spatial_tokens = pooled_map.flatten(2).transpose(1, 2)
-            ys = torch.linspace(-1.0, 1.0, height, device=pooled_map.device, dtype=pooled_map.dtype)
-            xs = torch.linspace(-1.0, 1.0, width, device=pooled_map.device, dtype=pooled_map.dtype)
-            grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-            coords = torch.stack([grid_x, grid_y], dim=-1).reshape(1, height * width, 2)
-            spatial_tokens = spatial_tokens + self.coord_proj(coords).expand(batch_size, -1, -1)
             query = self.agent_query(agent_tokens)
             spatial_context, _ = self.spatial_attention(query, spatial_tokens, spatial_tokens, need_weights=False)
         # DeepSets aggregation: masked mean is invariant to UAV ordering and
@@ -155,11 +184,187 @@ class CNNDeepSetsPolicy(nn.Module):
             decoder_parts.append(spatial_context)
         decoder_parts += [expanded_state, expanded_task, expanded_global]
         decoder_input = torch.cat(decoder_parts, dim=-1)
-        mean = self.decoder(decoder_input)
+        mean = self.actor_mean_residual_weight * self.decoder(decoder_input)
+        if self.use_global_slot_head and self.global_slot_strength > 0.0:
+            mean = mean + self._global_slot_bias(obs, state_feat, agent_mask)
+        if self.use_spatial_action_head and self.spatial_action_strength > 0.0:
+            mean = mean + self._spatial_action_bias(
+                obs,
+                agent_tokens,
+                expanded_state,
+                expanded_task,
+                expanded_global,
+                spatial_tokens,
+                spatial_coords,
+                agent_mask,
+            )
+        if self.coordination_repulsion_strength > 0.0:
+            mean = mean + self._coordination_repulsion_bias(obs, agent_mask)
         if agent_mask is not None:
             mean = mean * agent_mask.unsqueeze(-1).float()
         value = self.value_head(state_feat).squeeze(-1)
         return mean, value
+
+    def _build_spatial_tokens(self, field_map: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        pooled_map = F.adaptive_avg_pool2d(field_map, (self.spatial_pool_size, self.spatial_pool_size))
+        batch_size, channels, height, width = pooled_map.shape
+        spatial_tokens = pooled_map.flatten(2).transpose(1, 2)
+        ys = torch.linspace(-1.0, 1.0, height, device=pooled_map.device, dtype=pooled_map.dtype)
+        xs = torch.linspace(-1.0, 1.0, width, device=pooled_map.device, dtype=pooled_map.dtype)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([grid_x, grid_y], dim=-1).reshape(1, height * width, 2).expand(batch_size, -1, -1)
+        spatial_tokens = spatial_tokens + self.coord_proj(coords)
+        return spatial_tokens, coords
+
+    def _spatial_action_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        agent_tokens: torch.Tensor,
+        expanded_state: torch.Tensor,
+        expanded_task: torch.Tensor,
+        expanded_global: torch.Tensor,
+        spatial_tokens: torch.Tensor,
+        spatial_coords: torch.Tensor,
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        query_input = torch.cat([agent_tokens, expanded_state, expanded_task, expanded_global], dim=-1)
+        query = self.spatial_action_query(query_input)
+        logits = torch.matmul(query, spatial_tokens.transpose(1, 2)) / max(spatial_tokens.shape[-1] ** 0.5, 1.0)
+        weights = self._spatial_action_weights(logits, spatial_coords, obs, agent_mask)
+        target_coords = torch.einsum("bnt,btc->bnc", weights, spatial_coords)
+
+        positions = obs["agents"][..., :2]
+        map_size = torch.clamp(obs["global_info"][..., 4:5], min=1e-6).unsqueeze(1)
+        positions_norm = 2.0 * (positions / map_size) - 1.0
+        delta = torch.clamp(target_coords - positions_norm, -2.0, 2.0)
+        if agent_mask is not None:
+            delta = delta * agent_mask.unsqueeze(-1).float()
+        return self.spatial_action_strength * delta
+
+    def _global_slot_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        state_feat: torch.Tensor,
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        slot_coords = torch.tanh(self.global_slot_head(state_feat)).view(state_feat.shape[0], self.max_slots, 2)
+        ranks = self._angular_slot_ranks(obs, agent_mask)
+        assigned_slots = torch.gather(slot_coords, 1, ranks.unsqueeze(-1).expand(-1, -1, 2))
+        positions = obs["agents"][..., :2]
+        map_size = torch.clamp(obs["global_info"][..., 4:5], min=1e-6).unsqueeze(1)
+        positions_norm = 2.0 * (positions / map_size) - 1.0
+        delta = torch.clamp(assigned_slots - positions_norm, -2.0, 2.0)
+        if agent_mask is not None:
+            delta = delta * agent_mask.unsqueeze(-1).float()
+        return self.global_slot_strength * delta
+
+    def _spatial_action_weights(
+        self,
+        logits: torch.Tensor,
+        spatial_coords: torch.Tensor,
+        obs: dict[str, torch.Tensor],
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.sector_target_bias_strength > 0.0:
+            logits = logits + self._sector_target_bias(obs, spatial_coords, agent_mask)
+        if self.spatial_target_suppression_strength <= 0.0:
+            return torch.softmax(logits, dim=-1)
+
+        coords_rel = spatial_coords.unsqueeze(2) - spatial_coords.unsqueeze(1)
+        dist_sq = (coords_rel ** 2).sum(dim=-1)
+        suppression_kernel = torch.exp(-dist_sq / max(self.spatial_target_suppression_sigma, 1e-6))
+
+        batch_size, num_agents, num_tokens = logits.shape
+        weights = torch.zeros_like(logits)
+        suppression = torch.zeros((batch_size, num_tokens), device=logits.device, dtype=logits.dtype)
+        for agent_idx in range(num_agents):
+            adjusted_logits = logits[:, agent_idx, :] - self.spatial_target_suppression_strength * suppression
+            current_weights = torch.softmax(adjusted_logits, dim=-1)
+            if agent_mask is not None:
+                valid = agent_mask[:, agent_idx].unsqueeze(-1).float()
+                current_weights = current_weights * valid
+            weights[:, agent_idx, :] = current_weights
+            suppression = suppression + torch.einsum("bt,bts->bs", current_weights, suppression_kernel)
+        return weights
+
+    def _sector_target_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        spatial_coords: torch.Tensor,
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        ranks = self._angular_slot_ranks(obs, agent_mask)
+        num_agents = obs["agents"].shape[1]
+        sector_centers = (2.0 * torch.pi) * (ranks.float() + 0.5) / max(num_agents, 1)
+        token_angles = torch.atan2(spatial_coords[..., 1], spatial_coords[..., 0]).unsqueeze(1)
+        sector_centers = sector_centers.unsqueeze(-1)
+        angle_delta = torch.atan2(
+            torch.sin(token_angles - sector_centers),
+            torch.cos(token_angles - sector_centers),
+        ).abs()
+        bias = self.sector_target_bias_strength * (1.0 - angle_delta / torch.pi)
+        if agent_mask is not None:
+            bias = bias * agent_mask.unsqueeze(-1).float()
+        return bias
+
+    def _angular_slot_ranks(
+        self,
+        obs: dict[str, torch.Tensor],
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        positions = obs["agents"][..., :2]
+        if agent_mask is None:
+            centroid = positions.mean(dim=1, keepdim=True)
+        else:
+            centroid = masked_mean(positions, agent_mask, dim=1).unsqueeze(1)
+        rel = positions - centroid
+        angles = torch.atan2(rel[..., 1], rel[..., 0])
+        if agent_mask is not None:
+            angles = torch.where(agent_mask, angles, torch.full_like(angles, 1e9))
+        order = torch.argsort(angles, dim=1)
+        ranks = torch.argsort(order, dim=1)
+        if agent_mask is not None:
+            ranks = torch.where(agent_mask, ranks, torch.zeros_like(ranks))
+        return ranks
+
+    def _angular_slot_features(
+        self,
+        obs: dict[str, torch.Tensor],
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        ranks = self._angular_slot_ranks(obs, agent_mask)
+        return self.angular_slot_embeddings(ranks)
+
+    def _coordination_repulsion_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Add a small learned-free repulsion bias to encourage agent spread.
+
+        This is disabled by default and only intended for coverage-style
+        experiments where repeated overlap dominates before the policy learns to
+        partition the map.
+        """
+
+        positions = obs["agents"][..., :2]
+        map_size = torch.clamp(obs["global_info"][..., 4:5], min=1e-6).unsqueeze(1)
+        positions_norm = positions / map_size
+        rel = positions_norm.unsqueeze(2) - positions_norm.unsqueeze(1)
+        dist_sq = (rel ** 2).sum(dim=-1, keepdim=True)
+
+        batch_size, num_agents, _, _ = rel.shape
+        eye = torch.eye(num_agents, device=rel.device, dtype=torch.bool).view(1, num_agents, num_agents, 1)
+        valid_pairs = ~eye
+        if agent_mask is not None:
+            pair_mask = (agent_mask.unsqueeze(2) & agent_mask.unsqueeze(1)).unsqueeze(-1)
+            valid_pairs = valid_pairs & pair_mask
+
+        weighted_rel = torch.where(valid_pairs, rel / torch.clamp(dist_sq, min=1e-4), torch.zeros_like(rel))
+        repulsion = weighted_rel.sum(dim=2)
+        repulsion_norm = torch.linalg.norm(repulsion, dim=-1, keepdim=True)
+        repulsion_dir = repulsion / torch.clamp(repulsion_norm, min=1e-6)
+        return self.coordination_repulsion_strength * repulsion_dir
 
     def get_action_and_value(self, obs: dict[str, torch.Tensor], action: torch.Tensor | None = None):
         """Sample/evaluate tanh-squashed joint actions for PPO-style training."""

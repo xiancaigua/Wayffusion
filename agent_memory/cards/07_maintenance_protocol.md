@@ -16,6 +16,8 @@ This includes:
 - output directory changes
 - training and evaluation workflow changes
 - documentation changes that redefine the current source of truth
+- long-horizon research debug changes that add `outputs/debug_long/<timestamp>/` records, diagnostics, or dataset builders
+- robustness changes to debug artifact writers, such as atomic save behavior for `.npz` / JSON sidecars
 
 ## Minimum required updates
 
@@ -26,6 +28,15 @@ For every qualifying change:
 3. update `cards/05_reuse_rules.md` if reuse guidance changed
 4. update this card if the maintenance process itself changed
 5. update `manifest.yaml` if cards were added, removed, or renamed
+
+## Debug-long rule
+
+Long-horizon debug work is only considered complete when both of the following are true:
+
+- the code/config change is applied and verified
+- the corresponding `outputs/debug_long/<timestamp>/` notes capture the command, result, and conclusion
+
+This keeps research-oriented repairs auditable even when the final answer is still partial or negative.
 
 ## Review checklist
 

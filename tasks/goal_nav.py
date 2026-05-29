@@ -38,13 +38,20 @@ class GoalNavigationTask(BaseTask):
         }
 
     def build_field(self, task_state: dict, env_state: dict) -> dict:
-        return {"goal_reward": task_state["goal_reward_map"]}
+        remaining_goals = task_state["goals"][~task_state["goal_reached"]]
+        goal_reward_map = gaussian_map(
+            remaining_goals,
+            env_state["grid_size"],
+            sigma=0.055 * env_state["spatial_scale"],
+            map_size=env_state["map_size"],
+        )
+        return {"goal_reward": goal_reward_map}
 
     def compute_reward(self, task_state, prev_env_state, env_state, transition_info) -> TaskStepResult:
         previous_goal_cost = float(task_state["goal_progress"])
-        goal_cost = self._goal_cost(task_state["goals"], env_state["positions"])
-        progress = previous_goal_cost - goal_cost
-        task_state["goal_progress"] = goal_cost
+        previous_remaining_goals = task_state["goals"][~task_state["goal_reached"]]
+        progress_cost = self._goal_cost(previous_remaining_goals, env_state["positions"])
+        progress = previous_goal_cost - progress_cost
 
         goal_radius = self.config["goal_radius"] * env_state.get("spatial_scale", 1.0)
         distances = np.linalg.norm(
@@ -52,6 +59,8 @@ class GoalNavigationTask(BaseTask):
         )
         newly_reached = (~task_state["goal_reached"]) & (distances.min(axis=0) <= goal_radius)
         task_state["goal_reached"] |= newly_reached
+        remaining_goals = task_state["goals"][~task_state["goal_reached"]]
+        task_state["goal_progress"] = self._goal_cost(remaining_goals, env_state["positions"])
 
         goal_count = max(len(task_state["goals"]), 1)
         coverage_ratio = float(task_state["goal_reached"].mean()) if len(task_state["goal_reached"]) else 0.0
@@ -65,7 +74,14 @@ class GoalNavigationTask(BaseTask):
             per_goal_counts = (reached_distances <= goal_radius).sum(axis=0)
             repeated_goal = int(np.maximum(per_goal_counts - 1, 0).sum())
         repeated_ratio = float(repeated_goal) / float(max(env_state["num_agents"], 1))
-        mean_goal_distance = float(distances.min(axis=0).mean()) if len(task_state["goals"]) else 0.0
+        if len(remaining_goals):
+            remaining_distances = np.linalg.norm(
+                env_state["positions"][:, None, :] - remaining_goals[None, :, :],
+                axis=-1,
+            )
+            mean_goal_distance = float(remaining_distances.min(axis=0).mean())
+        else:
+            mean_goal_distance = 0.0
         normalized_distance = mean_goal_distance / max(float(env_state.get("map_size", 1.0)), 1e-6)
         normalized_progress = float(np.clip(progress / max(goal_radius, 1e-6), -2.0, 2.0))
 
