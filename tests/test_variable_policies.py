@@ -159,3 +159,19 @@ def test_cnn_deepsets_policy_supports_slot_dominant_actor():
     action = policy.act_deterministic(obs_tensor).detach().cpu().numpy()
     assert action.shape == (1, 4, 2)
     assert np.all(np.isfinite(action))
+
+
+def test_cnn_deepsets_policy_supports_global_spatial_slot_head():
+    config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 4, "task_name": "coverage"})
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=31)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["use_global_spatial_slot_head"] = True
+    policy_config["global_spatial_slot_strength"] = 0.5
+    policy_config["use_angular_slot_embeddings"] = True
+    policy_config["slot_embedding_strength"] = 1.0
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action = policy.act_deterministic(obs_tensor).detach().cpu().numpy()
+    assert action.shape == (1, 4, 2)
+    assert np.all(np.isfinite(action))

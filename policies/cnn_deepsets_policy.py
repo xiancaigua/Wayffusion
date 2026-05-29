@@ -52,6 +52,8 @@ class CNNDeepSetsPolicy(nn.Module):
         sector_target_bias_strength: float = 0.0,
         use_global_slot_head: bool = False,
         global_slot_strength: float = 0.0,
+        use_global_spatial_slot_head: bool = False,
+        global_spatial_slot_strength: float = 0.0,
         actor_mean_residual_weight: float = 1.0,
         log_std_min: float = -1.5,
         log_std_max: float = 0.5,
@@ -71,6 +73,8 @@ class CNNDeepSetsPolicy(nn.Module):
         self.sector_target_bias_strength = float(sector_target_bias_strength)
         self.use_global_slot_head = bool(use_global_slot_head)
         self.global_slot_strength = float(global_slot_strength)
+        self.use_global_spatial_slot_head = bool(use_global_spatial_slot_head)
+        self.global_spatial_slot_strength = float(global_spatial_slot_strength)
         self.actor_mean_residual_weight = float(actor_mean_residual_weight)
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
@@ -126,6 +130,9 @@ class CNNDeepSetsPolicy(nn.Module):
         )
         if self.use_global_slot_head:
             self.global_slot_head = nn.Linear(joint_hidden_dim, self.max_slots * 2)
+        if self.use_global_spatial_slot_head:
+            self.global_spatial_slot_context = nn.Linear(joint_hidden_dim, last_channels)
+            self.global_spatial_slot_embeddings = nn.Embedding(self.max_slots, last_channels)
         # The actor is decoded per agent from local token + global context. That
         # keeps actions individualized while still coordinated by state_feat.
         self.decoder = nn.Sequential(
@@ -185,6 +192,8 @@ class CNNDeepSetsPolicy(nn.Module):
         decoder_parts += [expanded_state, expanded_task, expanded_global]
         decoder_input = torch.cat(decoder_parts, dim=-1)
         mean = self.actor_mean_residual_weight * self.decoder(decoder_input)
+        if self.use_global_spatial_slot_head and self.global_spatial_slot_strength > 0.0:
+            mean = mean + self._global_spatial_slot_bias(obs, state_feat, spatial_tokens, spatial_coords, agent_mask)
         if self.use_global_slot_head and self.global_slot_strength > 0.0:
             mean = mean + self._global_slot_bias(obs, state_feat, agent_mask)
         if self.use_spatial_action_head and self.spatial_action_strength > 0.0:
@@ -257,6 +266,33 @@ class CNNDeepSetsPolicy(nn.Module):
         if agent_mask is not None:
             delta = delta * agent_mask.unsqueeze(-1).float()
         return self.global_slot_strength * delta
+
+    def _global_spatial_slot_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        state_feat: torch.Tensor,
+        spatial_tokens: torch.Tensor | None,
+        spatial_coords: torch.Tensor | None,
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if spatial_tokens is None or spatial_coords is None:
+            return torch.zeros_like(obs["agents"][..., :2])
+        batch_size = state_feat.shape[0]
+        context = self.global_spatial_slot_context(state_feat).unsqueeze(1)
+        slot_ids = torch.arange(self.max_slots, device=state_feat.device)
+        slot_queries = self.global_spatial_slot_embeddings(slot_ids).unsqueeze(0).expand(batch_size, -1, -1) + context
+        logits = torch.matmul(slot_queries, spatial_tokens.transpose(1, 2)) / max(spatial_tokens.shape[-1] ** 0.5, 1.0)
+        weights = torch.softmax(logits, dim=-1)
+        slot_coords = torch.einsum("bst,btc->bsc", weights, spatial_coords)
+        ranks = self._angular_slot_ranks(obs, agent_mask)
+        assigned_slots = torch.gather(slot_coords, 1, ranks.unsqueeze(-1).expand(-1, -1, 2))
+        positions = obs["agents"][..., :2]
+        map_size = torch.clamp(obs["global_info"][..., 4:5], min=1e-6).unsqueeze(1)
+        positions_norm = 2.0 * (positions / map_size) - 1.0
+        delta = torch.clamp(assigned_slots - positions_norm, -2.0, 2.0)
+        if agent_mask is not None:
+            delta = delta * agent_mask.unsqueeze(-1).float()
+        return self.global_spatial_slot_strength * delta
 
     def _spatial_action_weights(
         self,

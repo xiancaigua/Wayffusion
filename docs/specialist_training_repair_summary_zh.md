@@ -209,7 +209,15 @@
 
 当前最值得复用的 coverage run：
 
-- [outputs/training/bc_ppo/20260528_phase10_coverage_spatialhead_ultra/phase10_coverage_spatialhead_ultra/training_metrics.csv](/workspace/Wayffusion/Wayffusion/outputs/training/bc_ppo/20260528_phase10_coverage_spatialhead_ultra/phase10_coverage_spatialhead_ultra/training_metrics.csv)
+- [outputs/training/bc_ppo/20260529_phase24_coverage_successonly_v2_bestfinal/phase24_coverage_successonly_v2_bestfinal](/workspace/Wayffusion/Wayffusion/outputs/training/bc_ppo/20260529_phase24_coverage_successonly_v2_bestfinal/phase24_coverage_successonly_v2_bestfinal)
+
+当前 best-eval checkpoint：
+
+- `checkpoints/checkpoint_best_eval.pt`
+- best update: `120`
+- `success_rate=0.15`
+- `coverage_ratio≈0.673`
+- `collision≈0.00019`
 
 结论：
 

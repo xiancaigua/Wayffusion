@@ -8,11 +8,12 @@
 
 - 继续 coverage 的 expert-v2 BC -> spatial-head PPO 主线
 - 优先观察 `coverage_ratio` 是否能稳定跨过 `0.5`、`0.6`、再接近 `0.82`
-- 当前 spatial-head PPO 已经把 coverage specialist 推到连续非零 success 区：
-  - update 20/40 都有 `success≈0.10`
-  - `coverage_ratio≈0.67`
-  - `collision≈0.0003~0.0006`
-- final eval 仍回到 `success=0.0`，但 `coverage_ratio≈0.667` 与 `collision≈0.003` 仍远好于旧主线
+- 当前 best-final coverage PPO 已经把 specialist 推到更高一点的成功区：
+  - best eval `success≈0.15`
+  - `coverage_ratio≈0.673`
+  - `collision≈0.00019`
+  - run root:
+    `outputs/training/bc_ppo/20260529_phase24_coverage_successonly_v2_bestfinal/phase24_coverage_successonly_v2_bestfinal/`
 - 当前更具体的 coverage 主线是：
   - `expert-v2 dataset -> spatial-head BC -> spatial-head PPO`
   - 如果继续推进，优先用成功策略轨迹继续做 success-heavy BC / DAgger，而不是继续单纯加 reward scale

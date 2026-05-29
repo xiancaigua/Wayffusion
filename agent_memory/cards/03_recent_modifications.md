@@ -662,6 +662,66 @@ Reason:
 - coverage and formation repeatedly showed “mid-run best, final worse”
 - selecting the best checkpoint for final reporting is a pragmatic engineering fix that turns an unstable tail into a usable specialist artifact without changing the training update rule itself
 
+## Theme AJ: coverage success-only reinforcement deepening
+
+Implemented:
+
+- collected a stronger success-heavy coverage dataset from `phase10` update 80 over a better seed window:
+  - `outputs/debug_long/20260529_coverage_success_policy/coverage_success_from_phase10_u80_seed5000_plus_expertv2.npz`
+  - `successful_episodes=15`
+- extracted / iterated success-only mixes:
+  - `coverage_success_only_from_phase10_u80_seed5000.npz`
+  - `coverage_success_from_successBC_e40.npz`
+  - `coverage_success_from_successBC_e40_round2.npz`
+  - `coverage_success_from_successBC_e40_round3.npz`
+- trained successive success-heavy BC refinements:
+  - `outputs/training/bc/20260529_015503/...`
+  - `outputs/training/bc/20260529_021428/...`
+  - `outputs/training/bc/20260529_051145/...`
+  - `outputs/training/bc/20260529_155058/...`
+
+Current evidence:
+
+- the first success-heavy BC pushed coverage BC success from `0.05` to `0.10`
+- the next strengthened success-heavy BC pushed it further to:
+  - `return_mean≈9.697`
+  - `normalized_score_mean≈2.814`
+  - `success_rate_mean≈0.15`
+  - `collision_rate_mean≈0.0`
+- PPO launched from these stronger success-only BC checkpoints (`phase20`, `phase23`) still did not exceed the `phase21 best` coverage PPO line
+
+Reason:
+
+- coverage success behavior can be partially reinforced through data, but the gain saturates before PPO turns that into a clearly better final specialist
+- this suggests the remaining bottleneck is no longer “missing success examples” alone
+
+## Theme AK: true group-level coverage actor candidates
+
+Implemented:
+
+- added optional `use_global_spatial_slot_head` / `global_spatial_slot_strength`
+- added optional `actor_mean_residual_weight`
+- added configs and probes for:
+  - `global-slot BC`
+  - `global-slot PPO`
+  - `sector-bias PPO`
+  - `slot-dominant BC`
+- expanded `tests/test_variable_policies.py` to cover:
+  - global slot head
+  - slot-dominant actor
+  - global-slot compatibility across tasks
+
+Current evidence:
+
+- `global-slot BC` and `slot-dominant BC` did not beat the best `spatial-head BC`
+- `phase26_coverage_gspatialslot_bestfinal` first eval is still only `success≈0.05`
+- the best coverage line remains the simpler `spatial-head PPO` branch with best-final checkpoint selection
+
+Reason:
+
+- lightweight group-level extensions are now present and compatible, but they have not yet beaten the current best coverage mainline
+- further progress on coverage likely needs a stronger, more explicit group-level coordination design rather than another small bias term
+
 ## Theme P: Sequential PPO task-combination queue launcher
 
 Implemented:

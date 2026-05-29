@@ -263,15 +263,27 @@
   - `u60` with `action_noise_std=0.05`: 仍只有 `2 / 240`
 - 因此“少量 success-only reinforcement”当前不足以单独修通 coverage
 - `phase10` 依然是当前 coverage 的最佳 PPO 主线：
-  - 多个连续 eval 点 `success≈0.10`
-  - `coverage_ratio≈0.67~0.68`
-  - `collision≈0.00025~0.00063`
+  - 后续已被 `phase24 best-final` 超过
+  - 当前最优 PPO 主线为：
+    - `outputs/training/bc_ppo/20260529_phase24_coverage_successonly_v2_bestfinal/phase24_coverage_successonly_v2_bestfinal/`
+    - best eval: `success≈0.15`
+    - `coverage_ratio≈0.673`
+    - `collision≈0.00019`
 - `phase15`, `phase17`, `phase18` 这些后续轻量修正都没有超过 `phase10`
+- 但 success-heavy 强化后的 `phase24 best-final` 已经超过旧的 `phase10/phase21` 主线
+- 更强的 success-heavy BC 强化能把 BC 本体从 `success≈0.05` 推到 `success≈0.15`
+- 但从这些 success-heavy BC 再起的 PPO (`phase20`, `phase23`) 仍未超过 `phase21/phase10` 最佳点
+- 当前轻量 group-level 变体：
+  - `global slot head`
+  - `global spatial slot head`
+  - `slot-dominant actor`
+  - `sector target bias`
+  也都还没有超过 `phase10/phase21` 主线
 
 结论：
 
 - coverage 当前已经是“局部修通但终局不稳”
-- 下一步如果继续推进，最可能需要真正更强的组级协调 actor，而不是再叠一层轻量偏置
+- 下一步如果继续推进，最可能需要真正更强的组级协调 actor，而不是继续在当前 policy 上叠轻量偏置或少量 success-only 数据
 
 后续 agent 在做统计或自动扫描时必须区分“历史遗留 run”和“当前规范 run”。
 

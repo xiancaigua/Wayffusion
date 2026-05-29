@@ -44,6 +44,8 @@ def build_policy(policy_config: dict, observation_space, action_space):
             sector_target_bias_strength=float(policy_config.get("sector_target_bias_strength", 0.0)),
             use_global_slot_head=bool(policy_config.get("use_global_slot_head", False)),
             global_slot_strength=float(policy_config.get("global_slot_strength", 0.0)),
+            use_global_spatial_slot_head=bool(policy_config.get("use_global_spatial_slot_head", False)),
+            global_spatial_slot_strength=float(policy_config.get("global_spatial_slot_strength", 0.0)),
             actor_mean_residual_weight=float(policy_config.get("actor_mean_residual_weight", 1.0)),
             log_std_min=float(policy_config.get("log_std_min", -1.5)),
             log_std_max=float(policy_config.get("log_std_max", 0.5)),
