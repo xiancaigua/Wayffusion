@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from baselines import HeuristicPolicy
 from envs import CentralizedMultiUAVEnv
 from scripts._common import ensure_dir, normalize_task_names, observation_override_from_variant, prepare_env_config
+from scripts.debug_long.generate_coverage_expert_v2_dataset import CoverageExpertV2, CoverageExpertV3, CoverageExpertV4
 from utils import save_expert_dataset
 
 
@@ -107,6 +108,11 @@ def main() -> None:
     parser.add_argument("--obs_variant", default="multi_channel_field+task_id")
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1700)
+    parser.add_argument(
+        "--teacher",
+        choices=["heuristic", "coverage_expert_v2", "coverage_expert_v3", "coverage_expert_v4"],
+        default="heuristic",
+    )
     args = parser.parse_args()
 
     task_names = normalize_task_names(args.tasks)
@@ -130,7 +136,20 @@ def main() -> None:
             observation_override=observation_override_from_variant(args.obs_variant),
         )
         env = CentralizedMultiUAVEnv(env_config)
-        policy = HeuristicPolicy(env_config)
+        if args.teacher == "coverage_expert_v2":
+            if task_names != ["coverage"]:
+                raise ValueError("coverage_expert_v2 can only be used with the coverage task.")
+            policy = CoverageExpertV2(env_config)
+        elif args.teacher == "coverage_expert_v3":
+            if task_names != ["coverage"]:
+                raise ValueError("coverage_expert_v3 can only be used with the coverage task.")
+            policy = CoverageExpertV3(env_config)
+        elif args.teacher == "coverage_expert_v4":
+            if task_names != ["coverage"]:
+                raise ValueError("coverage_expert_v4 can only be used with the coverage task.")
+            policy = CoverageExpertV4(env_config)
+        else:
+            policy = HeuristicPolicy(env_config)
         while attempts < int(args.max_attempts) and successful_episodes < int(args.success_episodes):
             episode_seed = int(args.seed) + attempts
             observation, _ = env.reset(seed=episode_seed)
@@ -182,6 +201,7 @@ def main() -> None:
         "samples": len(payload["action"]),
         "sample_stride": sample_stride,
         "max_samples": int(args.max_samples),
+        "teacher": str(args.teacher),
         "success_rate_over_attempts": float(successful_episodes / max(attempts, 1)),
         "mean_success_return": float(np.mean([row["return"] for row in episode_summaries if row["success"] > 0.5])),
         "mean_success_path_length": float(np.mean([row["path_length"] for row in episode_summaries if row["success"] > 0.5])),

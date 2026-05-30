@@ -77,6 +77,7 @@ def main():
         scaling_mode=args.scaling_mode,
         observation_override=observation_override_from_variant(args.obs_variant),
     )
+    policy_config.setdefault("bc_waypoint_step", float(env_config.get("max_waypoint_step", 1.0)))
     from envs import CentralizedMultiUAVEnv
 
     build_env = CentralizedMultiUAVEnv(env_config)

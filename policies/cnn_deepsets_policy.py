@@ -54,6 +54,19 @@ class CNNDeepSetsPolicy(nn.Module):
         global_slot_strength: float = 0.0,
         use_global_spatial_slot_head: bool = False,
         global_spatial_slot_strength: float = 0.0,
+        use_coverage_utility_slot_head: bool = False,
+        coverage_utility_slot_strength: float = 0.0,
+        coverage_utility_temperature: float = 8.0,
+        coverage_utility_pool_size: int = 16,
+        coverage_utility_sector_bias_strength: float = 1.2,
+        coverage_utility_suppression_strength: float = 3.0,
+        coverage_utility_suppression_sigma: float = 0.25,
+        coverage_utility_target_weight: float = 0.6,
+        coverage_utility_desired_weight: float = 1.8,
+        coverage_utility_visited_weight: float = -0.4,
+        coverage_utility_risk_weight: float = -0.2,
+        coverage_utility_obstacle_weight: float = -0.8,
+        coverage_utility_agent_density_weight: float = -0.3,
         actor_mean_residual_weight: float = 1.0,
         log_std_min: float = -1.5,
         log_std_max: float = 0.5,
@@ -75,6 +88,19 @@ class CNNDeepSetsPolicy(nn.Module):
         self.global_slot_strength = float(global_slot_strength)
         self.use_global_spatial_slot_head = bool(use_global_spatial_slot_head)
         self.global_spatial_slot_strength = float(global_spatial_slot_strength)
+        self.use_coverage_utility_slot_head = bool(use_coverage_utility_slot_head)
+        self.coverage_utility_slot_strength = float(coverage_utility_slot_strength)
+        self.coverage_utility_temperature = float(coverage_utility_temperature)
+        self.coverage_utility_pool_size = int(coverage_utility_pool_size)
+        self.coverage_utility_sector_bias_strength = float(coverage_utility_sector_bias_strength)
+        self.coverage_utility_suppression_strength = float(coverage_utility_suppression_strength)
+        self.coverage_utility_suppression_sigma = float(coverage_utility_suppression_sigma)
+        self.coverage_utility_target_weight = float(coverage_utility_target_weight)
+        self.coverage_utility_desired_weight = float(coverage_utility_desired_weight)
+        self.coverage_utility_visited_weight = float(coverage_utility_visited_weight)
+        self.coverage_utility_risk_weight = float(coverage_utility_risk_weight)
+        self.coverage_utility_obstacle_weight = float(coverage_utility_obstacle_weight)
+        self.coverage_utility_agent_density_weight = float(coverage_utility_agent_density_weight)
         self.actor_mean_residual_weight = float(actor_mean_residual_weight)
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
@@ -196,6 +222,8 @@ class CNNDeepSetsPolicy(nn.Module):
             mean = mean + self._global_spatial_slot_bias(obs, state_feat, spatial_tokens, spatial_coords, agent_mask)
         if self.use_global_slot_head and self.global_slot_strength > 0.0:
             mean = mean + self._global_slot_bias(obs, state_feat, agent_mask)
+        if self.use_coverage_utility_slot_head and self.coverage_utility_slot_strength > 0.0:
+            mean = mean + self._coverage_utility_slot_bias(obs, agent_mask)
         if self.use_spatial_action_head and self.spatial_action_strength > 0.0:
             mean = mean + self._spatial_action_bias(
                 obs,
@@ -293,6 +321,103 @@ class CNNDeepSetsPolicy(nn.Module):
         if agent_mask is not None:
             delta = delta * agent_mask.unsqueeze(-1).float()
         return self.global_spatial_slot_strength * delta
+
+    def _coverage_utility_slot_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        task_field = obs["task_field"]
+        if task_field.shape[1] < 6:
+            return torch.zeros_like(obs["agents"][..., :2])
+
+        obstacle = task_field[:, 0]
+        target_probability = task_field[:, 2]
+        desired_occupancy = task_field[:, 3]
+        risk = task_field[:, 4]
+        visited = task_field[:, 5]
+        agent_density = task_field[:, 6] if task_field.shape[1] > 6 else torch.zeros_like(visited)
+        utility = (
+            self.coverage_utility_desired_weight * desired_occupancy
+            + self.coverage_utility_target_weight * target_probability
+            + self.coverage_utility_visited_weight * visited
+            + self.coverage_utility_risk_weight * risk
+            + self.coverage_utility_obstacle_weight * obstacle
+            + self.coverage_utility_agent_density_weight * agent_density
+        )
+        if self.coverage_utility_pool_size > 0:
+            pool_size = min(int(self.coverage_utility_pool_size), int(utility.shape[-2]), int(utility.shape[-1]))
+            utility = F.adaptive_avg_pool2d(utility.unsqueeze(1), (pool_size, pool_size)).squeeze(1)
+        batch_size, height, width = utility.shape
+        ys = torch.linspace(-1.0, 1.0, height, device=utility.device, dtype=utility.dtype)
+        xs = torch.linspace(-1.0, 1.0, width, device=utility.device, dtype=utility.dtype)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        spatial_coords = torch.stack([grid_x, grid_y], dim=-1).reshape(1, height * width, 2).expand(batch_size, -1, -1)
+
+        logits = utility.reshape(batch_size, 1, height * width).expand(-1, obs["agents"].shape[1], -1)
+        logits = self.coverage_utility_temperature * logits
+        if self.coverage_utility_sector_bias_strength > 0.0:
+            logits = logits + self._coverage_utility_sector_bias(obs, spatial_coords, agent_mask)
+        weights = self._coverage_utility_weights(logits, spatial_coords, agent_mask)
+        target_coords = torch.einsum("bnt,btc->bnc", weights, spatial_coords)
+
+        positions = obs["agents"][..., :2]
+        map_size = torch.clamp(obs["global_info"][..., 4:5], min=1e-6).unsqueeze(1)
+        positions_norm = 2.0 * (positions / map_size) - 1.0
+        delta = torch.clamp(target_coords - positions_norm, -2.0, 2.0)
+        if agent_mask is not None:
+            delta = delta * agent_mask.unsqueeze(-1).float()
+        return self.coverage_utility_slot_strength * delta
+
+    def _coverage_utility_weights(
+        self,
+        logits: torch.Tensor,
+        spatial_coords: torch.Tensor,
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.coverage_utility_suppression_strength <= 0.0:
+            weights = torch.softmax(logits, dim=-1)
+            if agent_mask is not None:
+                weights = weights * agent_mask.unsqueeze(-1).float()
+            return weights
+
+        coords_rel = spatial_coords.unsqueeze(2) - spatial_coords.unsqueeze(1)
+        dist_sq = (coords_rel ** 2).sum(dim=-1)
+        sigma = max(self.coverage_utility_suppression_sigma, 1e-6)
+        suppression_kernel = torch.exp(-dist_sq / sigma)
+
+        batch_size, num_agents, num_tokens = logits.shape
+        weights = torch.zeros_like(logits)
+        suppression = torch.zeros((batch_size, num_tokens), device=logits.device, dtype=logits.dtype)
+        for agent_idx in range(num_agents):
+            adjusted_logits = logits[:, agent_idx, :] - self.coverage_utility_suppression_strength * suppression
+            current_weights = torch.softmax(adjusted_logits, dim=-1)
+            if agent_mask is not None:
+                valid = agent_mask[:, agent_idx].unsqueeze(-1).float()
+                current_weights = current_weights * valid
+            weights[:, agent_idx, :] = current_weights
+            suppression = suppression + torch.einsum("bt,bts->bs", current_weights, suppression_kernel)
+        return weights
+
+    def _coverage_utility_sector_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        spatial_coords: torch.Tensor,
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        ranks = self._angular_slot_ranks(obs, agent_mask)
+        num_agents = obs["agents"].shape[1]
+        sector_centers = (2.0 * torch.pi) * (ranks.float() + 0.5) / max(num_agents, 1)
+        token_angles = torch.atan2(spatial_coords[..., 1], spatial_coords[..., 0]).unsqueeze(1)
+        sector_centers = sector_centers.unsqueeze(-1)
+        angle_delta = torch.atan2(
+            torch.sin(token_angles - sector_centers),
+            torch.cos(token_angles - sector_centers),
+        ).abs()
+        bias = self.coverage_utility_sector_bias_strength * (1.0 - angle_delta / torch.pi)
+        if agent_mask is not None:
+            bias = bias * agent_mask.unsqueeze(-1).float()
+        return bias
 
     def _spatial_action_weights(
         self,

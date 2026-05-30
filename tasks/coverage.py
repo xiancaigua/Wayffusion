@@ -10,6 +10,11 @@ class CoverageTask(BaseTask):
     name = "coverage"
     task_id = 1
 
+    def _success_ratio(self, task_state, env_state) -> float:
+        required_visits = max(int(task_state.get("required_visits", 1)), 1)
+        success_ratio = float(self.config["coverage"]["success_ratio"]) + 0.05 * max(required_visits - 1, 0)
+        return min(success_ratio, 0.999)
+
     def reset(self, rng: np.random.Generator, env_state: dict) -> dict:
         multi_peak = bool(self.config["coverage"]["multi_peak_probability"])
         task_count_scale = env_state.get("task_count_scale", 1.0)
@@ -89,8 +94,22 @@ class CoverageTask(BaseTask):
         coverage_reward = float(weights["new_coverage"] * max(new_coverage, coverage_delta))
         detection_reward = float(weights["high_probability"] * max(detection_gain, detection_delta))
         coverage_level_reward = float(weights.get("coverage_level", 0.0) * float(metrics["coverage_ratio"]))
+        success_ratio = self._success_ratio(task_state, env_state)
+        shortfall = max(success_ratio - float(metrics["coverage_ratio"]), 0.0)
+        shortfall_penalty = float(weights.get("coverage_shortfall", 0.0) * shortfall)
+        failure_penalty = 0.0
+        if not bool(metrics["success"]) and env_state["step_count"] >= int(env_state["max_steps"]):
+            failure_penalty = float(weights.get("failure_penalty", 0.0))
         repeated_penalty = float(weights["repeated_coverage"] * repeated_ratio)
-        reward = coverage_reward + detection_reward + coverage_level_reward + repeated_penalty + success_bonus
+        reward = (
+            coverage_reward
+            + detection_reward
+            + coverage_level_reward
+            + shortfall_penalty
+            + failure_penalty
+            + repeated_penalty
+            + success_bonus
+        )
         return TaskStepResult(
             reward=reward,
             success=bool(metrics["success"]),
@@ -99,6 +118,8 @@ class CoverageTask(BaseTask):
                 "coverage_reward": coverage_reward,
                 "detection_reward": detection_reward,
                 "coverage_level_reward": coverage_level_reward,
+                "coverage_shortfall_penalty": shortfall_penalty,
+                "coverage_failure_penalty": failure_penalty,
                 "repeated_coverage_penalty": repeated_penalty,
                 "coverage_success_bonus": success_bonus,
             },
@@ -119,8 +140,7 @@ class CoverageTask(BaseTask):
         centroid = positions.mean(axis=0, keepdims=True)
         dispersion = float(np.linalg.norm(positions - centroid, axis=-1).mean())
         min_steps = max(1, int(np.ceil(2.0 * np.sqrt(max(env_state.get("task_count_scale", 1.0), 1.0)))))
-        success_ratio = float(self.config["coverage"]["success_ratio"]) + 0.05 * max(required_visits - 1, 0)
-        success_ratio = min(success_ratio, 0.999)
+        success_ratio = self._success_ratio(task_state, env_state)
         success = coverage_ratio >= success_ratio and env_state["step_count"] >= min_steps
         return {
             "success": float(success),

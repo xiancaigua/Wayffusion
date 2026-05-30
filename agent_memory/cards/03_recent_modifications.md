@@ -258,6 +258,96 @@ Current best evidence:
 - ultra-strict PPO fine-tune from the DAgger BC checkpoint:
   - `outputs/training/bc_ppo/20260528_goalnav_dagger_finetune_ultra_strict/goalnav_dagger_finetune_ultra_strict/`
   - final `success_rate_mean=0.8`
+
+## Theme AC: coverage centralized per-agent waypoint allocation experiments
+
+Implemented:
+
+- `CNNDeepSetsPolicy` now has an optional `coverage_utility_slot_head`, disabled by default.
+- The new head reads the centralized multi-channel field and adds a small per-agent waypoint bias from a pooled coverage utility grid.
+- The head keeps the same action contract: output is still `[B, N, 2]`, log-prob remains one joint log-prob per env, and `agent_mask` still zeros padded agents.
+- `policies/__init__.py` forwards the new config fields.
+- `tests/test_variable_policies.py` now checks the utility slot head and cross-task compatibility.
+- New configs:
+  - `configs/policy/debug_bc_coverage_utilityslot.yaml`
+  - `configs/policy/debug_ppo_coverage_utilityslot_ultra_strict.yaml`
+
+Diagnostic result:
+
+- Direct untrained utility-slot behavior was bad (`coverage_ratio_mean≈0.314`, high collision), so the head is not a standalone heuristic.
+- BC on `coverage_success_from_phase24_best_round4.npz` produced:
+  - run: `outputs/training/bc/20260530_025202/debug_bc_coverage_utilityslot_coverage_N4_multi_channel_field_plus_task_id/`
+  - `success_rate_mean=0.10`
+  - `coverage_ratio_mean≈0.666`
+  - `collision_rate_mean≈0.000375`
+- PPO fine-tune `phase27_coverage_utilityslot` was stopped at update 40 because eval stayed at `success_rate=0.0`.
+
+Conclusion:
+
+- A fixed coverage utility bias can preserve low collision after BC, but it destabilizes PPO fine-tuning.
+- Do not continue this exact fixed-bias branch unless the bias is made learnable or much weaker.
+
+## Theme AD: coverage expert-v3 local frontier teacher
+
+Implemented:
+
+- `scripts/debug_long/generate_coverage_expert_v2_dataset.py` now also exposes `CoverageExpertV3` and `--expert v3`.
+- `CoverageExpertV3` uses local remaining-demand frontier selection plus short-range collision-avoidance repulsion.
+- `scripts/debug_long/generate_success_expert_dataset.py` now supports:
+  - `--teacher coverage_expert_v2`
+  - `--teacher coverage_expert_v3`
+
+Diagnostic result:
+
+- `CoverageExpertV2` diagnostic: `success=0.0`, `coverage_ratio_mean≈0.538`, high collision.
+- local frontier without repulsion: `success≈0.0625`, `coverage_ratio_mean≈0.645`, but collision was too high.
+- `CoverageExpertV3` with repulsion: `success≈0.07`, `coverage_ratio_mean≈0.622`, `collision≈0.0041`.
+
+Conclusion:
+
+- `CoverageExpertV3` is not a solved expert, but it is a better source of successful coverage trajectories than `CoverageExpertV2`.
+- Next coverage branch should collect success-only v3 trajectories, then train BC/PPO from that dataset.
+
+## Theme AE: coverage permutation-invariant BC breakthrough
+
+Implemented:
+
+- `algorithms/bc.py` now supports optional `permutation_invariant_loss`.
+- The loss works in waypoint space, not raw action space:
+  - predicted waypoint = current position + predicted action * `bc_waypoint_step`
+  - expert waypoint = current position + expert action * `bc_waypoint_step`
+  - all target waypoint assignments are enumerated for small N, and the minimum assignment loss is used
+- `scripts/train_bc.py` injects `bc_waypoint_step` from the env config into BC config.
+- Added `tests/test_bc_permutation_loss.py`.
+- Added `configs/policy/debug_bc_coverage_successonly_perm.yaml`.
+- Added `scripts/debug_long/merge_expert_datasets.py` for atomic NPZ dataset merges.
+
+Data generated:
+
+- `outputs/debug_long/20260530_coverage_expert_v3/coverage_expert_v3_success_N4_e40.npz`
+  - 40 successful episodes
+  - 7354 samples
+  - 665 attempts
+  - mean successful collision rate: `0.0`
+- `outputs/debug_long/20260530_coverage_expert_v3/coverage_success_round4_plus_v3_e40.npz`
+  - merged samples: 17162
+  - inputs:
+    - phase24 round4 success data: 9808 samples
+    - v3 success data: 7354 samples
+
+Key result:
+
+- permutation-invariant BC run:
+  - `outputs/training/bc/20260530_032314/debug_bc_coverage_successonly_perm_coverage_N4_multi_channel_field_plus_task_id/`
+  - `success_rate_mean=0.25`
+  - `coverage_ratio_mean≈0.717`
+  - `collision_rate_mean≈0.0079`
+  - `return_mean≈10.61`
+
+Conclusion:
+
+- Coverage BC was materially harmed by fixed-index expert action matching.
+- The current best coverage specialist checkpoint is now the permutation-invariant BC checkpoint, pending PPO fine-tune.
   - final `goal_coverage_ratio_mean=0.9425`
   - final `collision_rate_mean=0.0275`
   - final `return_mean=10.1225`
@@ -887,3 +977,207 @@ Reason:
 
 - BC and PPO now share a reproducible warm-start path
 - keeping the exploration scale fixed during fine-tune avoids reintroducing the BC checkpoint's looser action variance
+
+## Theme AF: coverage completion-focused reward diagnostic
+
+Implemented on 2026-05-30:
+
+- `tasks/coverage.py` now supports two default-off reward components:
+  - `coverage_shortfall`: per-step shaping based on the gap between current `coverage_ratio` and the unchanged success threshold
+  - `failure_penalty`: one terminal penalty when the episode reaches `max_steps` without coverage success
+- the default/base coverage task behavior is unchanged unless those weights are present in the env config
+- added `configs/env/debug_coverage_completion_focus.yaml`
+- added `configs/policy/debug_ppo_coverage_perm_ref_completion.yaml`
+- added `tests/test_rewards_basic.py::test_coverage_failure_penalty_only_on_unsuccessful_timeout`
+
+Reason:
+
+- latest coverage runs show the policy often plateaus around `coverage_ratio≈0.70` with low collision but below the fixed `0.82` success threshold
+- old reward settings paid large cumulative `coverage_level_reward` to non-successful long episodes, so PPO could prefer stable near-threshold failure over early successful termination
+- the diagnostic branch keeps the success threshold unchanged, reduces the incentive to idle at partial coverage, raises the success terminal signal, and explicitly penalizes timed-out non-success
+
+Validation:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_bc_permutation_loss.py tests/test_variable_policies.py tests/test_ppo_episode_budget.py tests/test_expert_dataset.py`
+- result: `22 passed`
+
+Current coverage evidence before phase31:
+
+- phase29 reference-regularized PPO best checkpoint:
+  - `outputs/training/bc_ppo/20260530_phase29_coverage_permref/phase29_coverage_permref/checkpoints/checkpoint_best_eval.pt`
+  - 50-episode eval: `success_rate_mean=0.16`, `coverage_ratio_mean≈0.702`, `collision_rate_mean≈0.00035`
+- phase29 self-success BC dataset and BC replay did not improve:
+  - dataset: `outputs/debug_long/20260530_coverage_expert_v3/coverage_success_round4_v3_phase29.npz`
+  - 50-episode eval of self-success BC: `success_rate_mean=0.08`, `coverage_ratio_mean≈0.708`, `collision_rate_mean≈0.000875`
+  - conclusion: simply cloning phase29 successful episodes regresses toward average partial-coverage behavior
+
+Next experiment:
+
+- phase31 should warm-start from phase29 best checkpoint and use the completion-focused env config
+- this is a labeled reward-shaping diagnostic, not a lowered-threshold success claim
+
+Phase31 result:
+
+- run root: `outputs/training/bc_ppo/20260530_phase31_coverage_completion/phase31_coverage_completion/`
+- best checkpoint update: `90`
+- 20-episode final/best eval: `success_rate_mean=0.30`, `coverage_ratio_mean≈0.720`, `collision_rate_mean≈0.00025`
+- 50-episode best eval: `success_rate_mean=0.16`, `coverage_ratio_mean≈0.707`, `collision_rate_mean≈0.000226`
+- conclusion: completion-focused reward fixes the objective semantics and maintains the 20-episode peak, but does not improve 50-episode robustness over phase29
+
+Additional coverage expert diagnostics:
+
+- added `CoverageExpertV4` in `scripts/debug_long/generate_coverage_expert_v2_dataset.py`
+  - stateful sector assignment
+  - persistent per-agent targets
+  - short-range collision repulsion
+- extended `scripts/debug_long/generate_success_expert_dataset.py --teacher` with `coverage_expert_v4`
+- validation:
+  - `/opt/conda/bin/python -m pytest -q tests/test_expert_dataset.py tests/test_rewards_basic.py tests/test_bc_permutation_loss.py tests/test_variable_policies.py`
+  - result: `21 passed`
+- direct 80-episode V4 eval:
+  - output: `outputs/debug_long/20260530_coverage_expert_v4/coverage_expert_v4_eval_e80.summary.json`
+  - `success_rate=0.0`, `coverage_ratio_mean≈0.567`, `collision_rate_mean≈0.0161`
+  - conclusion: V4 is worse than phase29 policy and should not be used for BC/PPO
+- direct 80-episode band-sweep diagnostic:
+  - output: `outputs/debug_long/20260530_coverage_band_sweep/band_sweep_eval_e80.summary.json`
+  - `success_rate=0.0`, `coverage_ratio_mean≈0.596`, `collision_rate_mean≈0.0127`
+  - conclusion: simple hand-coded lane/band sweep is not a viable teacher
+
+Phase32 result:
+
+- added `configs/policy/debug_ppo_coverage_perm_ref_completion_explore.yaml`
+- run root: `outputs/training/bc_ppo/20260530_phase32_coverage_completion_explore/phase32_coverage_completion_explore/`
+- warm-start: phase29 best checkpoint
+- key change: higher exploration (`log_std≈-1.2`), lower reference regularization, 2 PPO epochs, small entropy bonus
+- stopped manually after drift because best checkpoint was already saved:
+  - best checkpoint update: `20`
+  - 20-episode best eval: `success_rate_mean=0.35`
+  - later eval drifted to `0.15` at update 50 and `0.10` at update 60
+- 50-episode best eval:
+  - `success_rate_mean=0.20`
+  - `coverage_ratio_mean≈0.703`
+  - `collision_rate_mean≈0.000125`
+- conclusion: exploration can find slightly better coverage specialists than phase29/31, but the improvement is still weak and drifts without stronger stabilization
+
+Phase33 result:
+
+- added `configs/policy/debug_ppo_coverage_perm_ref_completion_stabilize.yaml`
+- run root: `outputs/training/bc_ppo/20260530_phase33_coverage_completion_stabilize/phase33_coverage_completion_stabilize/`
+- warm-start: phase32 best checkpoint
+- key change: lower LR (`3e-6`), stronger reference regularization (`0.35`), lower fixed exploration than phase32
+- training behavior:
+  - update20 eval `success_rate=0.35`
+  - update40 eval `success_rate=0.35`
+  - no phase32-style collapse through update80
+- 50-episode h200 best eval:
+  - `success_rate_mean=0.20`
+  - `coverage_ratio_mean≈0.707`
+  - `collision_rate_mean≈0.000125`
+- conclusion: phase33 stabilizes the 20-episode `0.35` peak but still only generalizes to `0.20` on h200
+
+Horizon feasibility diagnostic:
+
+- added `configs/env/debug_coverage_completion_focus_h300.yaml`
+- this config keeps `coverage.success_ratio=0.82` unchanged but increases `max_steps` from 200 to 300
+- same phase33 checkpoint evaluated under h300:
+  - output: `outputs/training/bc_ppo/20260530_phase33_coverage_completion_stabilize/phase33_coverage_completion_stabilize/eval_best_50_h300_diagnostic/`
+  - `success_rate_mean=0.48`
+  - `coverage_ratio_mean≈0.769`
+  - `collision_rate_mean≈0.000198`
+- interpretation:
+  - the h200 policy already knows a useful coverage behavior
+  - many h200 failures are time/path-budget failures, because allowing more steps without lowering the threshold nearly doubles the 50-episode success rate
+  - h300 is a diagnostic environment change and must not be mixed with h200 canonical results
+
+Phase34 h300 PPO result:
+
+- run root: `outputs/training/bc_ppo/20260530_phase34_coverage_h300_stabilize/phase34_coverage_h300_stabilize/`
+- warm-start: phase33 best checkpoint
+- env: `configs/env/debug_coverage_completion_focus_h300.yaml`
+- best checkpoint update: `60`
+- 20-episode best/final-source eval:
+  - `success_rate_mean=0.65`
+  - `collision_rate_mean=0.0`
+- 50-episode best eval:
+  - `success_rate_mean=0.56`
+  - `coverage_ratio_mean≈0.770`
+  - `collision_rate_mean≈0.000135`
+  - `path_length_mean≈1.410`
+- conclusion:
+  - coverage PPO can train a substantially stronger expert when the horizon allows enough path budget
+  - current h200 coverage remains unresolved; current h300 coverage is the strongest diagnostic specialist
+
+## Theme AG: factorized group actor policy
+
+Implemented on 2026-05-30:
+
+- added `policies/factorized_group_policy.py`
+- added `policy_class: factorized_group` to `policies/__init__.py`
+- added configs:
+  - `configs/policy/ppo_factorized_group.yaml`
+  - `configs/policy/debug_bc_goal_nav_factorized_group.yaml`
+  - `configs/policy/debug_ppo_goal_nav_factorized_group_finetune.yaml`
+  - `configs/policy/debug_bc_coverage_factorized_group_perm.yaml`
+  - `configs/policy/debug_ppo_coverage_factorized_group_h300.yaml`
+- added tests in `tests/test_variable_policies.py`
+
+Architecture contract:
+
+- critic remains centralized and still consumes one global state feature
+- actor remains shared across UAVs and still outputs `[B, N, 2]`
+- a small bank of learned group tokens is conditioned on the global state
+- each agent soft-assigns to those group tokens
+- group tokens optionally select spatial slots from the field and feed both:
+  - a per-agent group context into the actor decoder
+  - a group-coordinate waypoint bias
+- `agent_mask` and variable `N` stay supported
+- PPO joint log-prob aggregation remains unchanged because the action head still emits one factorized `[N,2]` action tensor per env
+
+Reason:
+
+- the old `CNNDeepSetsPolicy` already had a shared per-agent decoder, but all agents received the same pooled swarm context
+- this new policy inserts an explicit coordination layer between pooled state and per-agent action decoding, matching the requested “single-agent / small-group waypoint allocation under centralized information sharing” direction
+
+Validation:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_variable_policies.py tests/test_rewards_basic.py tests/test_bc_permutation_loss.py tests/test_expert_dataset.py`
+- result after policy integration: `23 passed`
+- final recheck after all edits:
+  - `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_expert_dataset.py tests/test_bc_permutation_loss.py tests/test_variable_policies.py tests/test_ppo_episode_budget.py`
+  - result: `22 passed`
+
+Goal-nav factorized-group specialist:
+
+- BC run:
+  - `outputs/training/bc/20260530_082030/debug_bc_goal_nav_factorized_group_goal_nav_N4_multi_channel_field_plus_task_id/`
+  - dataset: `outputs/debug_long/20260528_035433/datasets/goal_nav_dagger_from_bcppo060_plus_success.npz`
+  - 20-episode eval: `success_rate_mean=0.75`, `goal_coverage_ratio_mean≈0.855`
+- PPO fine-tune:
+  - `outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/`
+  - 20-episode best/final-source eval: `success_rate_mean=0.80`, `goal_coverage_ratio_mean≈0.872`
+  - 50-episode best eval:
+    - `success_rate_mean=0.78`
+    - `goal_coverage_ratio_mean≈0.877`
+    - `collision_rate_mean≈0.056`
+- conclusion:
+  - the new factorized-group policy can train a real PPO specialist expert on `goal_nav`
+  - this de-risks the new decision architecture itself
+
+Coverage factorized-group specialist:
+
+- BC run:
+  - `outputs/training/bc/20260530_083743/debug_bc_coverage_factorized_group_perm_coverage_N4_multi_channel_field_plus_task_id/`
+  - dataset: `outputs/debug_long/20260530_coverage_expert_v3/coverage_success_round4_plus_v3_e40.npz`
+  - 20-episode eval: `success_rate_mean=0.20`, `coverage_ratio_mean≈0.700+`, `collision_rate_mean=0.0`
+- h300 PPO fine-tune:
+  - `outputs/training/bc_ppo/20260530_phase37_coverage_factorized_group_h300/phase37_coverage_factorized_group_h300/`
+  - 20-episode final-source eval: `success_rate_mean=0.50`, `coverage_ratio_mean≈0.768`, `collision_rate_mean≈0.0`
+  - 50-episode best eval:
+    - `success_rate_mean=0.40`
+    - `coverage_ratio_mean≈0.768`
+    - `collision_rate_mean≈0.00138`
+- comparison against old h300 specialist:
+  - old phase34 h300 50-episode eval: `success_rate_mean=0.56`, `coverage_ratio_mean≈0.770`, `collision_rate_mean≈0.000135`
+- conclusion:
+  - the new architecture is viable for coverage but is not yet the best-performing coverage policy
+  - current factorized-group coverage issue is not “cannot train at all”; it is “path efficiency / stability still worse than old spatial-head line”

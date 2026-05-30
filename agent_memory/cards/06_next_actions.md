@@ -105,9 +105,15 @@
 
 如果后续 agent 需要继续主线开发，建议优先路线是：
 
-1. `coverage true group-level actor`
-2. `formation best-checkpoint stabilization`
-3. `verification refresh`
-4. `checkpoint/latest helper`
-5. `config naming cleanup`
-6. `new canonical training run`
+1. Keep `goal_nav` factorized-group as the first validated new-architecture specialist:
+   `outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`.
+2. Coverage decision point now has two branches:
+   old spatial-head h300 best: `success_rate_mean=0.56`;
+   new factorized-group h300 best: `success_rate_mean=0.40`.
+3. If the project priority is “new architecture everywhere”, tune factorized-group coverage next:
+   lower collision and path inefficiency, likely via fewer groups, stronger group waypoint bias, or group-specific suppression.
+4. If the priority is “best specialist now”, keep old phase34 as coverage canonical and continue factorized-group only as a replacement branch.
+5. h200 coverage is still unresolved regardless of architecture; both old and new policies remain far below a strong specialist under the 200-step budget.
+6. Do not use `coverage_expert_v4` or the band-sweep diagnostic as teachers; both had `success_rate=0.0`.
+7. Run formation best-checkpoint stabilization after the coverage architecture decision.
+8. Refresh `outputs/verification.md`, checkpoint latest helpers, and canonical multitask runs after specialist routes stabilize.

@@ -89,12 +89,214 @@ class CoverageExpertV2:
         return np.clip((ordered_targets - positions) / max(self.max_waypoint_step, 1e-6), -1.0, 1.0).astype(np.float32)
 
 
+class CoverageExpertV3:
+    """Local frontier coverage expert with short-range collision avoidance."""
+
+    def __init__(self, config: dict, topk: int = 512):
+        self.max_waypoint_step = float(config["max_waypoint_step"])
+        self.collision_radius = float(config["collision_radius"])
+        self.topk = int(topk)
+
+    def act(self, observation: dict) -> np.ndarray:
+        positions = observation["agents"][:, :2]
+        task_field = observation["task_field"]
+        map_size = float(observation["global_info"][-1])
+        obstacle = task_field[0]
+        target_probability = task_field[2]
+        desired_occupancy = task_field[3]
+        risk = task_field[4]
+        visited = task_field[5]
+        agent_density = task_field[6]
+
+        remaining = np.clip(1.0 - visited, 0.0, 1.0)
+        demand = (desired_occupancy > 0.0).astype(np.float32)
+        utility = (3.0 * demand + 0.9 * target_probability) * remaining
+        utility = utility - 0.9 * risk - 2.2 * obstacle - 0.35 * agent_density
+
+        flat_utility = utility.reshape(-1)
+        topk = min(self.topk, flat_utility.size)
+        candidate_idx = np.argpartition(flat_utility, -topk)[-topk:]
+        ys, xs = np.unravel_index(candidate_idx, utility.shape)
+        candidate_points = np.stack(
+            [
+                xs / max(utility.shape[1] - 1, 1) * map_size,
+                ys / max(utility.shape[0] - 1, 1) * map_size,
+            ],
+            axis=-1,
+        ).astype(np.float32)
+        candidate_scores = flat_utility[candidate_idx].astype(np.float32)
+
+        selected_targets: list[np.ndarray] = []
+        target_pairs: list[tuple[int, np.ndarray]] = []
+        used = np.zeros((len(candidate_points),), dtype=bool)
+        centroid = positions.mean(axis=0)
+        agent_order = np.argsort(np.linalg.norm(positions - centroid, axis=1))[::-1]
+        for agent_idx in agent_order:
+            position = positions[agent_idx]
+            distances = np.linalg.norm(candidate_points - position, axis=1)
+            local_bonus = np.exp(-distances / 0.22)
+            if selected_targets:
+                selected = np.asarray(selected_targets, dtype=np.float32)
+                spread_bonus = np.linalg.norm(candidate_points[:, None, :] - selected[None, :, :], axis=-1).min(axis=1)
+            else:
+                spread_bonus = np.full((len(candidate_points),), 0.2, dtype=np.float32)
+            scores = 4.5 * candidate_scores + 1.3 * local_bonus + 1.1 * spread_bonus - 0.4 * distances
+            scores[used] = -1e9
+            best_idx = int(np.argmax(scores))
+            used[best_idx] = True
+            selected_targets.append(candidate_points[best_idx])
+            target_pairs.append((int(agent_idx), candidate_points[best_idx]))
+
+        ordered_targets = np.zeros_like(positions, dtype=np.float32)
+        for agent_idx, target in target_pairs:
+            ordered_targets[agent_idx] = target
+        action = (ordered_targets - positions) / max(self.max_waypoint_step, 1e-6)
+
+        rel = positions[:, None, :] - positions[None, :, :]
+        distances = np.linalg.norm(rel, axis=-1, keepdims=True)
+        avoidance_radius = 3.0 * self.collision_radius
+        mask = (distances > 1e-6) & (distances < avoidance_radius)
+        repulsion_scale = (avoidance_radius - np.minimum(distances, avoidance_radius)) / max(avoidance_radius, 1e-6)
+        repulsion = np.where(mask, rel / np.maximum(distances, 1e-6) * repulsion_scale, 0.0).sum(axis=1)
+        action = action + 0.8 * repulsion
+        return np.clip(action, -1.0, 1.0).astype(np.float32)
+
+
+class CoverageExpertV4:
+    """Stateful sector coverage expert with persistent per-agent targets."""
+
+    def __init__(self, config: dict, topk: int = 768):
+        self.max_waypoint_step = float(config["max_waypoint_step"])
+        self.collision_radius = float(config["collision_radius"])
+        self.topk = int(topk)
+        self.targets: np.ndarray | None = None
+        self.target_age: np.ndarray | None = None
+        self.last_progress = -1.0
+
+    def _reset_if_needed(self, progress: float, num_agents: int) -> None:
+        if self.targets is None or self.targets.shape[0] != num_agents or progress <= self.last_progress:
+            self.targets = np.full((num_agents, 2), np.nan, dtype=np.float32)
+            self.target_age = np.zeros((num_agents,), dtype=np.int32)
+        self.last_progress = progress
+
+    @staticmethod
+    def _grid_value(grid: np.ndarray, point: np.ndarray, map_size: float) -> float:
+        h, w = grid.shape
+        x = int(np.clip(round(float(point[0]) / max(map_size, 1e-6) * (w - 1)), 0, w - 1))
+        y = int(np.clip(round(float(point[1]) / max(map_size, 1e-6) * (h - 1)), 0, h - 1))
+        return float(grid[y, x])
+
+    def _select_target(
+        self,
+        agent_idx: int,
+        sector_idx: int,
+        positions: np.ndarray,
+        candidate_points: np.ndarray,
+        candidate_scores: np.ndarray,
+        used: np.ndarray,
+        map_size: float,
+    ) -> np.ndarray:
+        num_agents = max(len(positions), 1)
+        center = np.full((2,), 0.5 * map_size, dtype=np.float32)
+        rel = candidate_points - center[None, :]
+        angles = (np.arctan2(rel[:, 1], rel[:, 0]) + 2.0 * np.pi) % (2.0 * np.pi)
+        target_angle = (float(sector_idx) + 0.5) / float(num_agents) * 2.0 * np.pi
+        angle_delta = np.abs((angles - target_angle + np.pi) % (2.0 * np.pi) - np.pi)
+        sector_bonus = np.exp(-angle_delta / max(np.pi / num_agents, 1e-6))
+
+        distances = np.linalg.norm(candidate_points - positions[agent_idx], axis=1)
+        if np.any(np.isfinite(self.targets).all(axis=1)):
+            finite_targets = self.targets[np.isfinite(self.targets).all(axis=1)]
+            spread = np.linalg.norm(candidate_points[:, None, :] - finite_targets[None, :, :], axis=-1).min(axis=1)
+        else:
+            spread = np.full((len(candidate_points),), 0.2 * map_size, dtype=np.float32)
+        scores = 6.0 * candidate_scores + 1.5 * sector_bonus + 0.9 * spread - 0.35 * distances
+        scores[used] = -1e9
+        best_idx = int(np.argmax(scores))
+        used[best_idx] = True
+        return candidate_points[best_idx]
+
+    def act(self, observation: dict) -> np.ndarray:
+        positions = observation["agents"][:, :2]
+        task_field = observation["task_field"]
+        progress = float(observation["global_info"][0])
+        map_size = float(observation["global_info"][-1])
+        self._reset_if_needed(progress, len(positions))
+
+        obstacle = task_field[0]
+        target_probability = task_field[2]
+        desired_occupancy = task_field[3]
+        risk = task_field[4]
+        visited = task_field[5]
+        agent_density = task_field[6]
+
+        demand = (desired_occupancy > 0.0).astype(np.float32)
+        remaining = np.clip(1.0 - visited, 0.0, 1.0)
+        utility = (4.0 * demand + 1.2 * target_probability) * remaining
+        utility = utility - 2.5 * obstacle - 0.5 * risk - 0.25 * agent_density
+
+        flat_utility = utility.reshape(-1)
+        topk = min(self.topk, flat_utility.size)
+        candidate_idx = np.argpartition(flat_utility, -topk)[-topk:]
+        ys, xs = np.unravel_index(candidate_idx, utility.shape)
+        candidate_points = np.stack(
+            [
+                xs / max(utility.shape[1] - 1, 1) * map_size,
+                ys / max(utility.shape[0] - 1, 1) * map_size,
+            ],
+            axis=-1,
+        ).astype(np.float32)
+        candidate_scores = flat_utility[candidate_idx].astype(np.float32)
+        used = np.zeros((len(candidate_points),), dtype=bool)
+
+        center = np.full((2,), 0.5 * map_size, dtype=np.float32)
+        agent_angles = (np.arctan2(positions[:, 1] - center[1], positions[:, 0] - center[0]) + 2.0 * np.pi) % (2.0 * np.pi)
+        agent_order = np.argsort(agent_angles)
+        sector_for_agent = np.zeros((len(positions),), dtype=np.int32)
+        for sector_idx, agent_idx in enumerate(agent_order):
+            sector_for_agent[int(agent_idx)] = int(sector_idx)
+
+        assert self.targets is not None
+        assert self.target_age is not None
+        for agent_idx in range(len(positions)):
+            target = self.targets[agent_idx]
+            keep_target = bool(np.isfinite(target).all())
+            if keep_target:
+                distance_to_target = float(np.linalg.norm(target - positions[agent_idx]))
+                remaining_at_target = self._grid_value(remaining * demand, target, map_size)
+                keep_target = distance_to_target > 0.035 and remaining_at_target > 0.15 and self.target_age[agent_idx] < 35
+            if not keep_target:
+                self.targets[agent_idx] = self._select_target(
+                    agent_idx,
+                    int(sector_for_agent[agent_idx]),
+                    positions,
+                    candidate_points,
+                    candidate_scores,
+                    used,
+                    map_size,
+                )
+                self.target_age[agent_idx] = 0
+            else:
+                self.target_age[agent_idx] += 1
+
+        action = (self.targets - positions) / max(self.max_waypoint_step, 1e-6)
+        rel = positions[:, None, :] - positions[None, :, :]
+        distances = np.linalg.norm(rel, axis=-1, keepdims=True)
+        avoidance_radius = 3.5 * self.collision_radius
+        mask = (distances > 1e-6) & (distances < avoidance_radius)
+        repulsion_scale = (avoidance_radius - np.minimum(distances, avoidance_radius)) / max(avoidance_radius, 1e-6)
+        repulsion = np.where(mask, rel / np.maximum(distances, 1e-6) * repulsion_scale, 0.0).sum(axis=1)
+        action = action + 0.9 * repulsion
+        return np.clip(action, -1.0, 1.0).astype(np.float32)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", type=int, default=40)
     parser.add_argument("--agent_count", type=int, default=4)
     parser.add_argument("--env-config", default="configs/env/multitask.yaml")
     parser.add_argument("--obs_variant", default="multi_channel_field+task_id")
+    parser.add_argument("--expert", choices=["v2", "v3", "v4"], default="v2")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -106,7 +308,12 @@ def main() -> None:
         observation_override=observation_override_from_variant(args.obs_variant),
     )
     env = CentralizedMultiUAVEnv(env_config)
-    policy = CoverageExpertV2(env_config)
+    if args.expert == "v4":
+        policy = CoverageExpertV4(env_config)
+    elif args.expert == "v3":
+        policy = CoverageExpertV3(env_config)
+    else:
+        policy = CoverageExpertV2(env_config)
     max_agents = int(args.agent_count)
 
     task_fields = []

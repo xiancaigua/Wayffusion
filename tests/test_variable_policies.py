@@ -175,3 +175,73 @@ def test_cnn_deepsets_policy_supports_global_spatial_slot_head():
     action = policy.act_deterministic(obs_tensor).detach().cpu().numpy()
     assert action.shape == (1, 4, 2)
     assert np.all(np.isfinite(action))
+
+
+def test_cnn_deepsets_policy_supports_coverage_utility_slot_head():
+    config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 4, "task_name": "coverage"})
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=37)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["use_coverage_utility_slot_head"] = True
+    policy_config["coverage_utility_slot_strength"] = 0.8
+    policy_config["coverage_utility_pool_size"] = 16
+    policy_config["actor_mean_residual_weight"] = 0.2
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action = policy.act_deterministic(obs_tensor).detach().cpu().numpy()
+    assert action.shape == (1, 4, 2)
+    assert np.all(np.isfinite(action))
+
+
+def test_cnn_deepsets_coverage_utility_slot_head_keeps_task_compatibility():
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["use_coverage_utility_slot_head"] = True
+    policy_config["coverage_utility_slot_strength"] = 0.7
+    policy_config["coverage_utility_pool_size"] = 16
+    policy_config["actor_mean_residual_weight"] = 0.2
+    for task_name in ["goal_nav", "coverage", "formation", "risk_nav"]:
+        config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 4, "task_name": task_name})
+        env = CentralizedMultiUAVEnv(config)
+        observation, _ = env.reset(seed=41)
+        policy = build_policy(policy_config, env.observation_space, env.action_space)
+        obs_tensor = observation_to_tensor(observation, device="cpu")
+        action = policy.act_deterministic(obs_tensor).detach().cpu().numpy()
+        assert action.shape == (1, 4, 2)
+        assert np.all(np.isfinite(action))
+
+
+def test_factorized_group_policy_outputs_joint_waypoints():
+    config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 6, "task_name": "coverage"})
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=43)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["policy_class"] = "factorized_group"
+    policy_config["num_groups"] = 3
+    policy_config["group_hidden_dim"] = 96
+    policy_config["group_action_strength"] = 0.6
+    policy_config["use_group_spatial_slots"] = True
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action, logprob, entropy, value = policy.get_action_and_value(obs_tensor)
+    assert action.shape == (1, 6, 2)
+    assert logprob.shape == (1,)
+    assert entropy.shape == (1,)
+    assert value.shape == (1,)
+    assert np.all(np.isfinite(action.detach().cpu().numpy()))
+
+
+def test_factorized_group_policy_keeps_task_compatibility():
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["policy_class"] = "factorized_group"
+    policy_config["num_groups"] = 2
+    policy_config["group_hidden_dim"] = 96
+    policy_config["group_action_strength"] = 0.5
+    for task_name in ["goal_nav", "coverage", "formation", "risk_nav"]:
+        config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 4, "task_name": task_name})
+        env = CentralizedMultiUAVEnv(config)
+        observation, _ = env.reset(seed=47)
+        policy = build_policy(policy_config, env.observation_space, env.action_space)
+        obs_tensor = observation_to_tensor(observation, device="cpu")
+        action = policy.act_deterministic(obs_tensor).detach().cpu().numpy()
+        assert action.shape == (1, 4, 2)
+        assert np.all(np.isfinite(action))

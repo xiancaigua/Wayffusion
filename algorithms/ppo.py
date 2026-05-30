@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import time
 from dataclasses import dataclass
@@ -115,6 +116,7 @@ class PPOTrainer:
         self.current_obs, _ = self.env_batch.reset()
         self.global_step = 0
         self.completed_episodes = 0
+        self.reference_policy: nn.Module | None = None
         self._clamp_policy_log_std()
 
     def set_env_batch(self, env_batch) -> None:
@@ -148,6 +150,22 @@ class PPOTrainer:
         log_std_max = float(self.train_config.get("log_std_max", getattr(self.policy, "log_std_max", 0.5)))
         with torch.no_grad():
             self.policy.log_std.clamp_(log_std_min, log_std_max)
+
+    def set_reference_policy_from_current(self) -> None:
+        """Freeze the current actor as an optional behavior regularizer."""
+
+        self.reference_policy = copy.deepcopy(self.policy).to(self.device)
+        self.reference_policy.eval()
+        for param in self.reference_policy.parameters():
+            param.requires_grad_(False)
+
+    def _masked_action_mse(self, prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        loss = (prediction - target) ** 2
+        if mask is not None:
+            loss = loss * mask.unsqueeze(-1).float()
+            denom = torch.clamp(mask.sum() * prediction.shape[-1], min=1.0)
+            return loss.sum() / denom
+        return loss.mean()
 
     def collect_rollout(self) -> tuple[PPOBatch, dict]:
         """Collect one on-policy rollout and compute GAE advantages.
@@ -289,6 +307,7 @@ class PPOTrainer:
             "clip_frac": 0.0,
             "ratio_mean": 0.0,
             "grad_norm": 0.0,
+            "reference_action_mse": 0.0,
         }
         step_count = 0
         kl_early_stop = 0.0
@@ -319,6 +338,18 @@ class PPOTrainer:
                 value_loss = 0.5 * ((value - mb_returns) ** 2).mean()
                 entropy_loss = entropy.mean()
                 loss = policy_loss + float(self.train_config["vf_coef"]) * value_loss - float(self.train_config["ent_coef"]) * entropy_loss
+                reference_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+                reference_coef = float(self.train_config.get("reference_policy_coef", 0.0) or 0.0)
+                if reference_coef > 0.0 and self.reference_policy is not None:
+                    with torch.no_grad():
+                        reference_action = self.reference_policy.act_deterministic(obs_tensors)
+                    current_action = self.policy.act_deterministic(obs_tensors)
+                    reference_loss = self._masked_action_mse(
+                        current_action,
+                        reference_action,
+                        obs_tensors.get("agent_mask"),
+                    )
+                    loss = loss + reference_coef * reference_loss
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -335,6 +366,7 @@ class PPOTrainer:
                 stats["clip_frac"] += float(clip_frac.item())
                 stats["ratio_mean"] += float(ratio.mean().item())
                 stats["grad_norm"] += float(grad_norm.item())
+                stats["reference_action_mse"] += float(reference_loss.item())
                 step_count += 1
                 if target_kl > 0.0 and float(approx_kl.item()) > target_kl:
                     kl_early_stop = 1.0

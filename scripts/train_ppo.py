@@ -121,6 +121,8 @@ def main():
     trainer = PPOTrainer(env_build, policy, train_config)
     if args.init_checkpoint:
         trainer.load_checkpoint(args.init_checkpoint)
+        if float(train_config.get("reference_policy_coef", 0.0) or 0.0) > 0.0:
+            trainer.set_reference_policy_from_current()
 
     output_root = "bc_ppo" if args.init_checkpoint else "ppo"
     run_name = safe_run_name(
