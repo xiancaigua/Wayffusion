@@ -1181,3 +1181,489 @@ Coverage factorized-group specialist:
 - conclusion:
   - the new architecture is viable for coverage but is not yet the best-performing coverage policy
   - current factorized-group coverage issue is not “cannot train at all”; it is “path efficiency / stability still worse than old spatial-head line”
+
+## Theme AH: factorized-group risk_nav and formation validation
+
+Implemented on 2026-05-30:
+
+- added new-architecture configs:
+  - `configs/policy/debug_bc_risk_nav_factorized_group.yaml`
+  - `configs/policy/debug_ppo_risk_nav_factorized_group_ultra_strict.yaml`
+  - `configs/policy/debug_bc_formation_factorized_group.yaml`
+  - `configs/policy/debug_ppo_formation_factorized_group_ultra_strict.yaml`
+  - `configs/policy/debug_ppo_risk_nav_factorized_group_safe_ref.yaml`
+- generated a risk low-collision diagnostic dataset:
+  - `outputs/debug_long/20260530_risk_nav_factorized_group/risk_nav_success_lowcollision_N4_stride2.npz`
+  - source: `outputs/debug_long/20260528_risk_nav_success/risk_nav_success_N4_stride2.npz`
+  - kept `30 / 40` successful episodes with `collision_rate <= 0.02`
+  - samples: `903`
+
+Risk-nav factorized-group results:
+
+- BC from original success dataset:
+  - run root: `outputs/training/bc/20260530_095258/debug_bc_risk_nav_factorized_group_risk_nav_N4_multi_channel_field_plus_task_id/`
+  - 20-episode eval: `success_rate_mean=0.45`, `goal_coverage_ratio_mean≈0.633`, `collision_rate_mean≈0.139`
+- PPO from that BC:
+  - run root: `outputs/training/bc_ppo/20260530_phase38_risknav_factorized_group_ppo/phase38_risknav_factorized_group_ppo/`
+  - 20-episode best/final-source eval: `success_rate_mean=0.45`, `collision_rate_mean≈0.129`
+  - 50-episode best eval: `success_rate_mean=0.24`, `goal_coverage_ratio_mean≈0.570`, `collision_rate_mean≈0.177`
+- safe/reference PPO diagnostic:
+  - run root: `outputs/training/bc_ppo/20260530_phase40_risknav_factorized_group_safe_ref/phase40_risknav_factorized_group_safe_ref/`
+  - stopped early after update 35 because eval stayed poor
+  - best observed eval: `success_rate=0.15`
+  - reason for failure: stronger repulsion and lower group bias degraded goal-reaching before it solved collisions
+- low-collision-only BC:
+  - run root: `outputs/training/bc/20260530_115519/debug_bc_risk_nav_factorized_group_risk_nav_N4_multi_channel_field_plus_task_id/`
+  - 20-episode eval: `success_rate_mean=0.05`, `collision_rate_mean≈0.240`
+  - reason for failure: filtering removed too much state coverage; the model overfit a narrower success subset and generalized worse
+- conclusion:
+  - risk_nav is not repaired under `factorized_group`
+  - current blocker is collision-heavy path behavior; imitation-only and simple repulsion/reference fixes were not enough
+  - old CNNDeepSets risk specialist remains stronger (`50/20 eval success around 0.60`)
+
+Formation factorized-group results:
+
+- BC from DAgger/full-heuristic dataset:
+  - run root: `outputs/training/bc/20260530_095515/debug_bc_formation_factorized_group_formation_N4_multi_channel_field_plus_task_id/`
+  - 20-episode eval: `success_rate_mean=0.50`, `formation_error_mean≈0.058`, `collision_rate_mean=0.0`
+- PPO from that BC:
+  - run root: `outputs/training/bc_ppo/20260530_phase39_formation_factorized_group_ppo/phase39_formation_factorized_group_ppo/`
+  - 20-episode best/final-source eval: `success_rate_mean=0.50`, `collision_rate_mean=0.0`
+  - 50-episode best eval: `success_rate_mean=0.44`, `formation_error_mean≈0.063`, `collision_rate_mean≈0.000825`
+- comparison:
+  - old formation best 20/final eval was around `success_rate_mean=0.35`
+- conclusion:
+  - formation is now provisionally repaired under `factorized_group`
+  - PPO did not improve BC, but best-checkpoint preservation keeps a useful specialist
+
+Validation:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_variable_policies.py tests/test_rewards_basic.py tests/test_bc_permutation_loss.py tests/test_expert_dataset.py tests/test_ppo_episode_budget.py`
+- result: `24 passed`
+
+## Theme AI: factorized_group continuation after connection loss
+
+Implemented / recorded:
+
+- Added `outputs/debug_long/20260530_factorized_group_continuation/00_takeover.md` as the recovery record for the current continuation.
+- Added `configs/env/debug_risk_nav_safety_completion.yaml`, a reward-only risk-nav diagnostic/training config. It changes reward weights only and preserves dynamics, observations, task success thresholds, max steps, and task definitions.
+- Added `configs/policy/debug_ppo_risk_nav_factorized_group_dagger_safe.yaml`, a conservative factorized-group PPO fine-tune config intended for DAgger BC checkpoints.
+
+Reason:
+
+- Under the new architecture, `goal_nav` is already repaired and `formation` is provisionally usable; `risk_nav` and `coverage` remain the blockers.
+- Risk-nav failure is currently best explained by unsafe/collision-heavy successful demonstrations plus distribution mismatch. Low-collision-only filtering previously reduced state coverage and generalized worse.
+- The next risk-nav repair attempt therefore uses learner-state DAgger plus conservative PPO rather than another strong hand-coded repulsion/reference branch.
+
+## Theme AJ: risk_nav factorized_group DAgger BC result
+
+Experiment:
+
+- Collected learner-state DAgger data from phase38 factorized-group risk learner and relabeled with `HeuristicPolicy`.
+- Dataset path: `outputs/debug_long/20260530_factorized_group_continuation/risk_nav_dagger_from_phase38_plus_success.npz`.
+- Dataset includes original success data plus 6971 new learner-state samples, 8394 total samples.
+- Trained BC with `configs/policy/debug_bc_risk_nav_factorized_group.yaml`.
+- BC run: `outputs/training/bc/20260530_121227/debug_bc_risk_nav_factorized_group_risk_nav_N4_multi_channel_field_plus_task_id/`.
+
+Result:
+
+- 30-episode BC eval: `success_rate_mean=0.533`, `collision_rate_mean=0.114`, `return_mean=-4.408`, `normalized_score_mean=0.659`.
+
+Reasoning:
+
+- This supports the hypothesis that risk-nav was not failing because the new architecture cannot represent useful actions; adding learner-state coverage improves success over the previous factorized-group risk plateau.
+- Remaining blocker is safety/collision, so the follow-up PPO should be conservative and safety-shaped rather than high-entropy exploration.
+
+## Theme AK: risk_nav factorized_group provisionally repaired
+
+Experiment:
+
+- PPO phase41 from the DAgger BC checkpoint using `configs/policy/debug_ppo_risk_nav_factorized_group_dagger_safe.yaml` and reward-only env config `configs/env/debug_risk_nav_safety_completion.yaml`.
+- Run: `outputs/training/bc_ppo/20260530_phase41_risknav_factorized_group_dagger_safe/phase41_risknav_factorized_group_dagger_safe/`.
+- Independent 100-episode eval: `outputs/debug_long/20260530_factorized_group_continuation/eval_phase41_risknav_100ep/risk_nav_N4_multi_channel_field_plus_task_id.csv`.
+
+Result:
+
+- Best-source 30-episode final eval: `success_rate_mean=0.70`, `collision_rate_mean=0.017`.
+- Independent 100-episode eval: `success_rate_mean=0.65`, `goal_coverage_ratio_mean=0.85`, `collision_rate_mean=0.0208`, `path_length_mean=0.699`.
+
+Reasoning:
+
+- DAgger fixed learner-state distribution mismatch; conservative PPO then improved safety/completion without overwriting BC behavior.
+- Risk-nav should now be treated as provisionally repaired under the new `factorized_group` architecture, pending seed-repeat validation.
+
+## Theme AL: coverage factorized_group h200 utility-slot PPO config
+
+Implemented:
+
+- Added `configs/policy/debug_ppo_coverage_factorized_group_completion_h200.yaml`.
+
+Reason:
+
+- Coverage under factorized-group is not mainly a collision/safety failure; it reaches reasonable coverage but misses the success threshold within the canonical 200-step budget.
+- h300 success is diagnostic only, not a canonical fix.
+- The new config stays on `factorized_group` and enables the existing coverage utility slot bias to improve spatial partitioning while using conservative PPO and reference regularization.
+
+## Theme AM: coverage phase42 direct utility PPO failed
+
+Experiment:
+
+- Started `phase42_coverage_factorized_group_h200_utility` from the factorized-group coverage BC checkpoint using `configs/policy/debug_ppo_coverage_factorized_group_completion_h200.yaml` and h200 completion reward config.
+
+Result:
+
+- Eval success was `0.0` at updates 20, 40, 60, and 80.
+- The run was stopped early after update 90.
+
+Reasoning:
+
+- Directly enabling the coverage utility slot bias at PPO time changed the action prior too much and destroyed the BC behavior.
+- Next coverage attempt should first train BC with the utility-enabled policy config, then PPO fine-tune from the adapted BC checkpoint.
+
+## Theme AN: coverage utility-head BC adaptation configs
+
+Implemented:
+
+- Added `configs/policy/debug_bc_coverage_factorized_group_utility_perm.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_utility_bcfit.yaml`.
+
+Reason:
+
+- phase42 showed that enabling a strong utility-slot bias only at PPO time destroys the BC action distribution.
+- The adapted route lowers utility/repulsion strength and first trains BC with the same action prior, so PPO starts from a policy already fitted to the modified architecture.
+
+## Theme AO: coverage utility-head BC failed
+
+Experiment:
+
+- Trained `configs/policy/debug_bc_coverage_factorized_group_utility_perm.yaml` on `outputs/debug_long/20260530_coverage_expert_v3/coverage_success_round4_plus_v3_e40.npz`.
+- Run: `outputs/training/bc/20260530_135952/debug_bc_coverage_factorized_group_utility_perm_coverage_N4_multi_channel_field_plus_task_id/`.
+
+Result:
+
+- BC loss reached about `0.002`.
+- 30-episode eval: `success_rate_mean=0.0`, `collision_rate_mean=0.022`, `return_mean=5.010`.
+
+Reasoning:
+
+- This branch shows that supervised action fit is not enough for closed-loop coverage success when the utility prior changes the trajectory distribution.
+- Do not PPO this checkpoint. Next coverage attempt should use learner-state DAgger with the original factorized-group policy first.
+
+## Theme AP: coverage h200 teacher diagnostics
+
+Diagnostics:
+
+- Evaluated existing coverage teachers in canonical h200 env. Results saved to `outputs/debug_long/20260530_factorized_group_continuation/coverage_teacher_h200_eval.json`.
+- `coverage_expert_v2` success `0.0`, coverage ratio `0.536`.
+- `coverage_expert_v3` success `0.025`, coverage ratio `0.598`.
+- `coverage_expert_v4` success `0.0`, coverage ratio `0.557`.
+- `heuristic_greedy_coverage` success `0.0`, coverage ratio `0.456`.
+- A temporary in-shell sweep prototype was tested and discarded because it had success `0.0`, coverage about `0.373`, and high collision.
+
+Reasoning:
+
+- Current coverage BC/DAgger data sources are not true h200 experts, so imitation alone is not expected to solve canonical h200 coverage.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_h200_stable.yaml` to run conservative PPO from the original factorized-group BC without utility-head changes.
+
+## Theme AQ: coverage phase43 h200 stable PPO did not break through
+
+Experiment:
+
+- Ran `phase43_coverage_factorized_group_h200_stable` from the original factorized-group coverage BC checkpoint.
+- Config: `configs/policy/debug_ppo_coverage_factorized_group_h200_stable.yaml`.
+- Env config: `configs/env/debug_coverage_completion_focus.yaml`.
+- Run: `outputs/training/bc_ppo/20260530_phase43_coverage_factorized_group_h200_stable/phase43_coverage_factorized_group_h200_stable/`.
+
+Result:
+
+- Best periodic 30-episode eval: `success_rate=0.20` at update 60.
+- Later evals stayed in `0.133-0.167`; run stopped early after update 120.
+
+Reasoning:
+
+- Stable PPO preserved but did not improve the original BC behavior.
+- Coverage h200 remains unresolved under `factorized_group`.
+- The blocker is now identified as missing high-success h200 supervision/curriculum, not direct architecture incompatibility or PPO math instability.
+
+## Theme AR: coverage ratio-curriculum reward config
+
+Implemented:
+
+- Added `configs/env/debug_coverage_ratio_curriculum.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_h200_ratio_curriculum.yaml`.
+
+Reason:
+
+- Coverage h200 policies are near but below threshold; teacher/DAgger and utility-head routes failed.
+- This route changes reward weights only, preserving threshold, h200 budget, dynamics, and task definition.
+- It increases dense coverage-level and terminal shortfall/failure pressure so PPO has stronger gradient near the success threshold.
+
+## Theme AS: coverage phase44 ratio-curriculum failed
+
+Experiment:
+
+- Ran `phase44_coverage_factorized_group_ratio_curriculum` using reward-only config `configs/env/debug_coverage_ratio_curriculum.yaml` and PPO config `configs/policy/debug_ppo_coverage_factorized_group_h200_ratio_curriculum.yaml`.
+- Run: `outputs/training/bc_ppo/20260530_phase44_coverage_factorized_group_ratio_curriculum/phase44_coverage_factorized_group_ratio_curriculum/`.
+
+Result:
+
+- Best periodic 30-episode eval: `success_rate=0.1667` at update 20.
+- Update 100 eval: `success_rate=0.1667`, `coverage_ratio=0.696`, `collision_rate=0.0090`.
+
+Reasoning:
+
+- Stronger dense coverage-ratio reward did not exceed the original BC baseline and made value fitting noisier.
+- Coverage h200 remains unresolved. Current evidence points to missing high-success h200 trajectory/curriculum signal rather than PPO math or the factorized-group architecture alone.
+
+## Theme AT: coverage optional milestone reward
+
+Implemented:
+
+- `tasks/coverage.py` now supports optional one-time coverage milestone bonuses configured by `reward_weights.coverage.milestone_thresholds` and `milestone_bonuses`.
+- Added `configs/env/debug_coverage_milestone_reward.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_h200_milestone.yaml`.
+- Added `test_coverage_milestone_reward_pays_once` in `tests/test_rewards_basic.py`.
+
+Reason:
+
+- Coverage h200 is stuck near-but-below the canonical success threshold. Existing dense ratio shaping did not provide useful PPO improvement.
+- Milestones provide clearer intermediate credit without changing success criteria, max steps, dynamics, observations, or task definition.
+
+Verification:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py`
+- Result: `22 passed`.
+
+## Theme AU: coverage phase45 milestone PPO did not transfer to canonical task
+
+Experiment:
+
+- Ran `phase45_coverage_factorized_group_milestone` with optional milestone reward.
+- Run: `outputs/training/bc_ppo/20260530_phase45_coverage_factorized_group_milestone/phase45_coverage_factorized_group_milestone/`.
+- Canonical 100-episode eval: `outputs/debug_long/20260530_factorized_group_continuation/eval_phase45_coverage_canonical_100ep/coverage_N4_multi_channel_field_plus_task_id.csv`.
+
+Result:
+
+- Milestone-env best-source 30-episode eval: `success_rate_mean=0.233`, `collision_rate_mean=0.0`.
+- Canonical h200 100-episode eval: `success_rate_mean=0.17`, `coverage_ratio_mean=0.715`, `collision_rate_mean=0.00236`, `repeated_coverage_ratio_mean=0.991`.
+
+Reasoning:
+
+- Milestone reward did not transfer to the canonical task. Coverage remains unresolved.
+- Very high repeated coverage ratio shows the remaining failure mode is inefficient revisit/poor spatial allocation, not safety or action saturation.
+
+## Theme AV: coverage terminal anti-revisit reward
+
+Implemented:
+
+- `tasks/coverage.py` now supports optional `reward_weights.coverage.terminal_repeated_coverage`.
+- Added `configs/env/debug_coverage_antirevisit_reward.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_h200_antirevisit.yaml`.
+- Added `test_coverage_terminal_repeated_penalty_only_on_timeout`.
+
+Reason:
+
+- Phase45 canonical eval showed `repeated_coverage_ratio_mean=0.991`; the dominant failure mode is repeated revisiting, not collision.
+- The new reward term penalizes final repeated coverage at timeout without changing success threshold, max steps, dynamics, or observations.
+
+Verification:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py`
+- Result: `23 passed`.
+
+## Theme AW: coverage phase46 anti-revisit PPO did not transfer
+
+Experiment:
+
+- Ran `phase46_coverage_factorized_group_antirevisit` with optional terminal anti-revisit reward.
+- Run: `outputs/training/bc_ppo/20260530_phase46_coverage_factorized_group_antirevisit/phase46_coverage_factorized_group_antirevisit/`.
+- Canonical 100-episode eval: `outputs/debug_long/20260530_factorized_group_continuation/eval_phase46_coverage_canonical_100ep/coverage_N4_multi_channel_field_plus_task_id.csv`.
+
+Result:
+
+- Anti-revisit training config best-source 30-episode eval: `success_rate_mean=0.267`, `collision_rate_mean=0.0`.
+- Canonical h200 100-episode eval: `success_rate_mean=0.20`, `coverage_ratio_mean=0.733`, `collision_rate_mean=0.00228`, `repeated_coverage_ratio_mean=0.99125`.
+
+Reasoning:
+
+- The reward term did not reduce repeated coverage under canonical validation. Coverage h200 remains unresolved.
+- The remaining issue requires persistent frontier assignment or a stronger h200 teacher/curriculum, not more scalar reward-only tweaks of the same form.
+
+## Theme AX: coverage canonical success-only dataset from phase46
+
+Experiment:
+
+- Collected successful canonical h200 coverage trajectories from phase46 best checkpoint.
+- Dataset: `outputs/debug_long/20260530_factorized_group_continuation/coverage_success_from_phase46_canonical_plus_v3.npz`.
+- Summary: `outputs/debug_long/20260530_factorized_group_continuation/coverage_success_from_phase46_canonical_plus_v3.summary.json`.
+
+Result:
+
+- 30 successful episodes from 142 attempts, success rate over attempts `0.2113`.
+- 22643 total samples including base dataset.
+- Mean success collision rate `0.0`, mean success path length `1.072`.
+
+Reasoning:
+
+- These are actual canonical h200 successes from the new architecture, so they are a better BC target than weak coverage heuristic teachers.
+
+## Theme AY: coverage success-heavy BC failed
+
+Experiment:
+
+- Trained original factorized-group BC config on `outputs/debug_long/20260530_factorized_group_continuation/coverage_success_from_phase46_canonical_plus_v3.npz`.
+- Run: `outputs/training/bc/20260530_163520/debug_bc_coverage_factorized_group_perm_coverage_N4_multi_channel_field_plus_task_id/`.
+
+Result:
+
+- Canonical 50-episode eval: `success_rate_mean=0.140`, `collision_rate_mean=0.0`, `return_mean=9.522`.
+
+Reasoning:
+
+- Rare success trajectory cloning overfits and lowers closed-loop robustness. Coverage remains unresolved.
+- The next credible route is persistent frontier/group target assignment or a true high-success h200 teacher, not more BC/PPO from current weak data.
+
+## Theme AZ: post-continuation regression test
+
+Verification:
+
+- Ran `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py tests/test_bc_permutation_loss.py tests/test_expert_dataset.py tests/test_ppo_episode_budget.py`.
+- Result: `26 passed`.
+
+Current task status under factorized_group after this continuation:
+
+- `goal_nav`: repaired from earlier phase36 evidence, 50-episode best eval `success_rate_mean=0.78`.
+- `risk_nav`: provisionally repaired in this continuation. Phase41 canonical/safety 100-episode eval `success_rate_mean=0.65`, `collision_rate_mean=0.0208`.
+- `formation`: provisionally repaired from earlier phase39 evidence, 50-episode best eval `success_rate_mean=0.44`, near-zero collision.
+- `coverage`: still unresolved under canonical h200. Best reliable canonical 100-episode result remains about `success_rate_mean=0.20`, coverage ratio about `0.733`; repeated coverage remains about `0.991`.
+
+## Theme BA: coverage frontier-slot policy for factorized_group
+
+Implemented:
+
+- Added optional `use_coverage_frontier_slot_head` to `policies/cnn_deepsets_policy.py`.
+- Wired the same frontier slot bias into `policies/factorized_group_policy.py`.
+- Added tests for CNNDeepSets and factorized-group frontier slot compatibility.
+- Added configs:
+  - `configs/policy/debug_bc_coverage_factorized_group_frontier_perm.yaml`
+  - `configs/policy/debug_ppo_coverage_factorized_group_frontier.yaml`
+
+Reason:
+
+- Coverage canonical h200 remained stuck around `0.20` success with repeated coverage ratio around `0.991`.
+- Reward-only tweaks and weak-teacher BC did not reduce repeated coverage.
+- The new frontier slot explicitly assigns agents to remaining unvisited demand using stable sectors and suppression, while preserving centralized critic and per-agent actor output shape.
+
+Verification:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_variable_policies.py tests/test_rewards_basic.py`
+- Result: `25 passed`.
+
+## Theme BB: coverage frontier-slot BC from scratch failed
+
+Experiment:
+
+- Trained `configs/policy/debug_bc_coverage_factorized_group_frontier_perm.yaml` from scratch on phase46 success-heavy dataset.
+- Run: `outputs/training/bc/20260531_015126/debug_bc_coverage_factorized_group_frontier_perm_coverage_N4_multi_channel_field_plus_task_id/`.
+
+Result:
+
+- Canonical 50-episode eval: `success_rate_mean=0.10`, `collision_rate_mean=0.004`, `return_mean=8.239`.
+
+Reasoning:
+
+- Supervised loss is low but closed-loop behavior degraded. Warm-start from the original coverage BC checkpoint is the next safer route.
+
+## Theme BC: coverage frontier-slot warm-start BC still below baseline
+
+Experiment:
+
+- Warm-started frontier BC from the original coverage BC checkpoint.
+- Run: `outputs/training/bc/20260531_015932/debug_bc_coverage_factorized_group_frontier_perm_coverage_N4_multi_channel_field_plus_task_id/`.
+
+Result:
+
+- Canonical 50-episode eval: `success_rate_mean=0.16`, `collision_rate_mean=0.003`, `return_mean=8.434`.
+
+Reasoning:
+
+- Warm-start helped compared with frontier BC from scratch but did not beat the original baseline. Next attempt is conservative PPO from this checkpoint.
+
+## Theme BD: coverage phase47 frontier PPO failed
+
+Experiment:
+
+- Ran `phase47_coverage_factorized_group_frontier` from warm-start frontier BC.
+- Run: `outputs/training/bc_ppo/20260531_phase47_coverage_factorized_group_frontier/phase47_coverage_factorized_group_frontier/`.
+
+Result:
+
+- Best/final-source 30-episode eval: `success_rate_mean=0.167`, `collision_rate_mean=0.012`.
+
+Reasoning:
+
+- Frontier strength `0.22` remains too disruptive. Next attempt should use lower frontier strength and original BC checkpoint.
+
+## Theme BE: low-strength coverage frontier PPO config
+
+Implemented:
+
+- Added `configs/policy/debug_ppo_coverage_factorized_group_frontier_low.yaml`.
+
+Reason:
+
+- Phase47 showed frontier strength `0.22` is too disruptive.
+- The low-strength config uses frontier strength `0.08`, stronger reference regularization, lower target KL, and starts directly from the original coverage BC checkpoint.
+
+## Theme BF: low-strength coverage frontier PPO failed
+
+Experiment:
+
+- Ran `phase48_coverage_factorized_group_frontier_low` from the original coverage BC checkpoint.
+- Run: `outputs/training/bc_ppo/20260531_phase48_coverage_factorized_group_frontier_low/phase48_coverage_factorized_group_frontier_low/`.
+
+Result:
+
+- Update 20 success `0.033`, update 40 success `0.033`, update 60 success `0.067`.
+- Stopped early after update 70.
+
+Reasoning:
+
+- Even low-strength immediate frontier bias damages the existing closed-loop coverage behavior. Do not continue this branch as-is.
+
+## Theme BG: coverage h200 teacher prototypes failed
+
+Diagnostics:
+
+- Tested an in-shell one-step local greedy coverage teacher: success `0.0`, coverage `≈0.379`, collision `0.0`.
+- Tested an in-shell waypoint-lookahead greedy coverage teacher: success `0.05`, coverage `≈0.608`, collision `≈0.0217`.
+
+Reasoning:
+
+- Simple greedy h200 teacher generation is insufficient. A useful coverage teacher likely needs explicit route planning/sweeping, not local scoring.
+- No official teacher code was added for these failed prototypes.
+
+## Theme BH: frontier continuation regression test
+
+Verification:
+
+- Ran `/opt/conda/bin/python -m pytest -q tests/test_variable_policies.py tests/test_rewards_basic.py tests/test_bc_permutation_loss.py tests/test_expert_dataset.py tests/test_ppo_episode_budget.py`.
+- Result: `28 passed`.
+- No training/evaluation process remained running after phase48 and teacher prototype diagnostics.
+
+## Theme BI: specialist PPO reliability documentation
+
+Implemented:
+
+- Added `docs/specialist_ppo_reliability_zh.md`.
+
+Content:
+
+- Explains why pure PPO is unreliable for this benchmark: sparse success, high-dimensional joint continuous actions, long horizon, multi-objective reward conflict, credit assignment, and on-policy drift.
+- Records why BC/DAgger warm-start is currently necessary rather than cosmetic.
+- Summarizes current per-task training recipes and status under `factorized_group`.
+- Documents why coverage remains unresolved and why the next route should be h200 route-planning/sweep teacher or stateful persistent target memory.
+
+Reason:
+
+- The user asked to preserve the recent analysis in both memory and docs so future agents can reuse the rationale instead of repeating failed PPO-only or reward-only attempts.

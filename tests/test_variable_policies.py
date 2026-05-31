@@ -210,6 +210,44 @@ def test_cnn_deepsets_coverage_utility_slot_head_keeps_task_compatibility():
         assert np.all(np.isfinite(action))
 
 
+def test_cnn_deepsets_policy_supports_coverage_frontier_slot_head():
+    config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 4, "task_name": "coverage"})
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=42)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["use_coverage_frontier_slot_head"] = True
+    policy_config["coverage_frontier_slot_strength"] = 0.6
+    policy_config["coverage_frontier_pool_size"] = 16
+    policy_config["actor_mean_residual_weight"] = 0.2
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action = policy.act_deterministic(obs_tensor).detach().cpu().numpy()
+    assert action.shape == (1, 4, 2)
+    assert np.all(np.isfinite(action))
+
+
+def test_factorized_group_policy_supports_coverage_frontier_slot_head():
+    config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 4, "task_name": "coverage"})
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=44)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["policy_class"] = "factorized_group"
+    policy_config["num_groups"] = 2
+    policy_config["group_hidden_dim"] = 96
+    policy_config["group_action_strength"] = 0.4
+    policy_config["use_coverage_frontier_slot_head"] = True
+    policy_config["coverage_frontier_slot_strength"] = 0.5
+    policy_config["coverage_frontier_pool_size"] = 16
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action, logprob, entropy, value = policy.get_action_and_value(obs_tensor)
+    assert action.shape == (1, 4, 2)
+    assert logprob.shape == (1,)
+    assert entropy.shape == (1,)
+    assert value.shape == (1,)
+    assert np.all(np.isfinite(action.detach().cpu().numpy()))
+
+
 def test_factorized_group_policy_outputs_joint_waypoints():
     config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 6, "task_name": "coverage"})
     env = CentralizedMultiUAVEnv(config)

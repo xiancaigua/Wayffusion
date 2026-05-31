@@ -46,6 +46,7 @@ class CoverageTask(BaseTask):
             "last_coverage_ratio": 0.0,
             "last_detection_score": 0.0,
             "success_bonus_paid": False,
+            "paid_milestones": set(),
             "total_repeated": 0.0,
             "total_detected": 0.0,
         }
@@ -94,6 +95,7 @@ class CoverageTask(BaseTask):
         coverage_reward = float(weights["new_coverage"] * max(new_coverage, coverage_delta))
         detection_reward = float(weights["high_probability"] * max(detection_gain, detection_delta))
         coverage_level_reward = float(weights.get("coverage_level", 0.0) * float(metrics["coverage_ratio"]))
+        milestone_reward = self._milestone_reward(task_state, float(metrics["coverage_ratio"]), weights)
         success_ratio = self._success_ratio(task_state, env_state)
         shortfall = max(success_ratio - float(metrics["coverage_ratio"]), 0.0)
         shortfall_penalty = float(weights.get("coverage_shortfall", 0.0) * shortfall)
@@ -101,13 +103,18 @@ class CoverageTask(BaseTask):
         if not bool(metrics["success"]) and env_state["step_count"] >= int(env_state["max_steps"]):
             failure_penalty = float(weights.get("failure_penalty", 0.0))
         repeated_penalty = float(weights["repeated_coverage"] * repeated_ratio)
+        terminal_repeated_penalty = 0.0
+        if env_state["step_count"] >= int(env_state["max_steps"]):
+            terminal_repeated_penalty = float(weights.get("terminal_repeated_coverage", 0.0) * float(metrics["repeated_coverage_ratio"]))
         reward = (
             coverage_reward
             + detection_reward
             + coverage_level_reward
+            + milestone_reward
             + shortfall_penalty
             + failure_penalty
             + repeated_penalty
+            + terminal_repeated_penalty
             + success_bonus
         )
         return TaskStepResult(
@@ -118,12 +125,30 @@ class CoverageTask(BaseTask):
                 "coverage_reward": coverage_reward,
                 "detection_reward": detection_reward,
                 "coverage_level_reward": coverage_level_reward,
+                "coverage_milestone_reward": milestone_reward,
                 "coverage_shortfall_penalty": shortfall_penalty,
                 "coverage_failure_penalty": failure_penalty,
                 "repeated_coverage_penalty": repeated_penalty,
+                "terminal_repeated_coverage_penalty": terminal_repeated_penalty,
                 "coverage_success_bonus": success_bonus,
             },
         )
+
+    def _milestone_reward(self, task_state: dict, coverage_ratio: float, weights: dict) -> float:
+        thresholds = weights.get("milestone_thresholds", [])
+        bonuses = weights.get("milestone_bonuses", [])
+        if not thresholds or not bonuses:
+            return 0.0
+        paid = task_state.setdefault("paid_milestones", set())
+        reward = 0.0
+        for index, threshold in enumerate(thresholds):
+            threshold_value = float(threshold)
+            if coverage_ratio < threshold_value or threshold_value in paid:
+                continue
+            bonus_idx = min(index, len(bonuses) - 1)
+            reward += float(bonuses[bonus_idx])
+            paid.add(threshold_value)
+        return float(reward)
 
     def get_metrics(self, task_state, env_state) -> dict:
         demand = np.maximum(task_state["coverage_demand"].sum(), 1.0)

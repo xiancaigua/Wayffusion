@@ -190,6 +190,106 @@ def test_coverage_failure_penalty_only_on_unsuccessful_timeout():
     assert success_result.components["coverage_failure_penalty"] == 0.0
 
 
+def test_coverage_milestone_reward_pays_once():
+    env = CentralizedMultiUAVEnv(
+        load_env_config(
+            "configs/env/multitask.yaml",
+            override={
+                "task_name": "coverage",
+                "reward_weights": {
+                    "coverage": {
+                        "new_coverage": 0.0,
+                        "high_probability": 0.0,
+                        "coverage_level": 0.0,
+                        "coverage_shortfall": 0.0,
+                        "repeated_coverage": 0.0,
+                        "success_bonus": 0.0,
+                        "failure_penalty": 0.0,
+                        "milestone_thresholds": [0.2, 0.4],
+                        "milestone_bonuses": [2.0, 3.0],
+                    }
+                },
+            },
+        )
+    )
+    env.reset(seed=3)
+    task = env.current_task
+    task_state = deepcopy(env.current_task_state)
+    prev_state = env._snapshot_state()
+    env_state = env._snapshot_state()
+    demand = task_state["coverage_demand"].astype(bool)
+    demand_indices = np.argwhere(demand)
+    first_count = max(1, int(np.ceil(0.45 * len(demand_indices))))
+    env_state["visit_count_map"] = np.zeros_like(env_state["visit_count_map"], dtype=np.float32)
+    env_state["step_coverage_mask"] = np.zeros_like(env_state["step_coverage_mask"], dtype=np.float32)
+    for y, x in demand_indices[:first_count]:
+        env_state["visit_count_map"][y, x] = 1.0
+        env_state["step_coverage_mask"][y, x] = 1.0
+
+    transition = {
+        "pair_collision_count": 0,
+        "obstacle_collision_count": 0,
+        "path_length_delta": 0.0,
+        "step_risk_exposure": 0.0,
+        "step_safety_violations": 0,
+        "num_agents": env.num_agents,
+        "spatial_scale": env.runtime_params["spatial_scale"],
+        "max_step_distance": env.runtime_params["max_speed"] * float(env.config["dt"]),
+    }
+    result = task.compute_reward(task_state, prev_state, env_state, transition)
+    assert result.components["coverage_milestone_reward"] == 5.0
+
+    repeated_result = task.compute_reward(task_state, prev_state, env_state, transition)
+    assert repeated_result.components["coverage_milestone_reward"] == 0.0
+
+
+def test_coverage_terminal_repeated_penalty_only_on_timeout():
+    env = CentralizedMultiUAVEnv(
+        load_env_config(
+            "configs/env/multitask.yaml",
+            override={
+                "task_name": "coverage",
+                "reward_weights": {
+                    "coverage": {
+                        "new_coverage": 0.0,
+                        "high_probability": 0.0,
+                        "coverage_level": 0.0,
+                        "coverage_shortfall": 0.0,
+                        "repeated_coverage": 0.0,
+                        "terminal_repeated_coverage": -5.0,
+                        "success_bonus": 0.0,
+                        "failure_penalty": 0.0,
+                    }
+                },
+            },
+        )
+    )
+    env.reset(seed=3)
+    task = env.current_task
+    task_state = deepcopy(env.current_task_state)
+    prev_state = env._snapshot_state()
+    env_state = env._snapshot_state()
+    env_state["visit_count_map"] = 2.0 * task_state["coverage_demand"].copy()
+    env_state["step_coverage_mask"] = task_state["coverage_demand"].copy()
+    transition = {
+        "pair_collision_count": 0,
+        "obstacle_collision_count": 0,
+        "path_length_delta": 0.0,
+        "step_risk_exposure": 0.0,
+        "step_safety_violations": 0,
+        "num_agents": env.num_agents,
+        "spatial_scale": env.runtime_params["spatial_scale"],
+        "max_step_distance": env.runtime_params["max_speed"] * float(env.config["dt"]),
+    }
+
+    non_terminal = task.compute_reward(task_state, prev_state, env_state, transition)
+    assert non_terminal.components["terminal_repeated_coverage_penalty"] == 0.0
+
+    env_state["step_count"] = int(env_state["max_steps"])
+    terminal = task.compute_reward(task_state, prev_state, env_state, transition)
+    assert terminal.components["terminal_repeated_coverage_penalty"] < 0.0
+
+
 def test_risk_nav_high_exposure_produces_negative_task_penalty():
     env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "risk_nav"}))
     env.reset(seed=7)

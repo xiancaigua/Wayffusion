@@ -160,6 +160,8 @@ class FactorizedGroupPolicy(CNNDeepSetsPolicy):
             mean = mean + self._global_slot_bias(obs, state_feat, agent_mask)
         if self.use_coverage_utility_slot_head and self.coverage_utility_slot_strength > 0.0:
             mean = mean + self._coverage_utility_slot_bias(obs, agent_mask)
+        if self.use_coverage_frontier_slot_head and self.coverage_frontier_slot_strength > 0.0:
+            mean = mean + self._coverage_frontier_slot_bias(obs, agent_mask)
         if self.use_spatial_action_head and self.spatial_action_strength > 0.0 and spatial_tokens is not None and spatial_coords is not None:
             mean = mean + self._spatial_action_bias(
                 obs,

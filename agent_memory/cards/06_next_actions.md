@@ -105,15 +105,150 @@
 
 如果后续 agent 需要继续主线开发，建议优先路线是：
 
-1. Keep `goal_nav` factorized-group as the first validated new-architecture specialist:
+1. Keep `goal_nav` factorized-group as repaired:
    `outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`.
-2. Coverage decision point now has two branches:
-   old spatial-head h300 best: `success_rate_mean=0.56`;
-   new factorized-group h300 best: `success_rate_mean=0.40`.
-3. If the project priority is “new architecture everywhere”, tune factorized-group coverage next:
-   lower collision and path inefficiency, likely via fewer groups, stronger group waypoint bias, or group-specific suppression.
-4. If the priority is “best specialist now”, keep old phase34 as coverage canonical and continue factorized-group only as a replacement branch.
-5. h200 coverage is still unresolved regardless of architecture; both old and new policies remain far below a strong specialist under the 200-step budget.
-6. Do not use `coverage_expert_v4` or the band-sweep diagnostic as teachers; both had `success_rate=0.0`.
-7. Run formation best-checkpoint stabilization after the coverage architecture decision.
-8. Refresh `outputs/verification.md`, checkpoint latest helpers, and canonical multitask runs after specialist routes stabilize.
+2. Keep `formation` factorized-group as provisionally repaired:
+   `outputs/training/bc_ppo/20260530_phase39_formation_factorized_group_ppo/phase39_formation_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`.
+3. Risk-nav under factorized-group is still not repaired:
+   current best 50-episode eval is `success_rate_mean=0.24`, with collision `≈0.177`.
+4. Next risk-nav route should not be simple repulsion/reference or low-collision-only BC; both failed.
+5. For risk-nav, try a richer DAgger dataset from learner states relabeled by the risk heuristic, or add a task-specific risk/goal spatial head while keeping `policy_class: factorized_group`.
+6. Coverage remains unresolved under h200 and weaker than old h300 under new architecture:
+   new factorized-group h300 best is `success_rate_mean=0.40`; old spatial-head h300 best is `0.56`.
+7. For coverage, next new-architecture route is group-specific coverage suppression or persistent group targets, not more heuristic V4/band-sweep data.
+8. Refresh `outputs/verification.md`, checkpoint latest helpers, and canonical multitask runs after risk_nav and coverage have new-architecture specialists.
+
+## 当前 continuation 路线：只推进 factorized_group
+
+约束：
+
+- 不再调旧 `CNNDeepSetsPolicy` 主线。
+- 不改环境动力学、任务定义、成功阈值或核心任务要素。
+- 允许 reward-only 配置实验，但必须显式记录为 debug/training config。
+
+立即执行：
+
+1. `risk_nav`: 用 `scripts/debug_long/collect_dagger_dataset.py` 从 factorized-group learner rollout 采样状态，并用 heuristic teacher relabel，输出到 `outputs/debug_long/20260530_factorized_group_continuation/`。
+2. `risk_nav`: 用原 success dataset + DAgger dataset 训练 factorized-group BC，再用 `configs/policy/debug_ppo_risk_nav_factorized_group_dagger_safe.yaml` 和 `configs/env/debug_risk_nav_safety_completion.yaml` 做保守 PPO。
+3. `coverage`: 从 factorized-group h300 best checkpoint 继续 completion-focused PPO，判断剩余问题是 episode budget/credit assignment 还是架构表达不足。
+4. 每个新增数据集、训练 run、代码或配置修改都必须同步写回 `agent_memory/cards/03_recent_modifications.md` 和本卡。
+
+Risk-nav continuation update:
+
+- DAgger BC improved factorized-group risk-nav to 30-episode `success_rate_mean=0.533`, but collision remains high at `0.114`.
+- Next action is conservative PPO from `outputs/training/bc/20260530_121227/debug_bc_risk_nav_factorized_group_risk_nav_N4_multi_channel_field_plus_task_id/checkpoints/checkpoint_0040.pt` using `configs/policy/debug_ppo_risk_nav_factorized_group_dagger_safe.yaml` and `configs/env/debug_risk_nav_safety_completion.yaml`.
+
+Risk-nav status after phase41:
+
+- Treat `risk_nav` as provisionally repaired under `factorized_group`.
+- Current best checkpoint: `outputs/training/bc_ppo/20260530_phase41_risknav_factorized_group_dagger_safe/phase41_risknav_factorized_group_dagger_safe/checkpoints/checkpoint_best_eval.pt`.
+- Evidence: independent 100-episode eval `success_rate_mean=0.65`, `collision_rate_mean=0.0208`.
+- Remaining validation: run at least one seed repeat after coverage is stabilized.
+
+Coverage next:
+
+- Do not use h300 as the canonical success claim because the user disallowed environment changes except reward.
+- Continue with h200 and reward-only completion shaping first.
+
+Coverage h200 experiment to run:
+
+- Start from factorized-group coverage BC checkpoint `outputs/training/bc/20260530_083743/debug_bc_coverage_factorized_group_perm_coverage_N4_multi_channel_field_plus_task_id/checkpoints/checkpoint_0024.pt`.
+- Train with `configs/policy/debug_ppo_coverage_factorized_group_completion_h200.yaml` and `configs/env/debug_coverage_completion_focus.yaml`.
+- Evaluate with at least 30 episodes during training and 100 episodes for the best checkpoint before claiming repair.
+
+Coverage phase42 result:
+
+- Direct utility-slot PPO failed and was stopped early.
+- Do not continue phase42.
+- Next action: train BC with the utility-enabled factorized-group policy on the existing coverage dataset, then PPO fine-tune from that BC checkpoint.
+
+Coverage utility BC result:
+
+- Utility-head BC failed despite low supervised loss: 30-episode success `0.0`.
+- Do not PPO from `outputs/training/bc/20260530_135952/...`.
+- Next action: coverage learner-state DAgger using phase37 factorized-group coverage learner as rollout policy and `coverage_expert_v2` as teacher, then BC/PPO with the original non-utility factorized-group config.
+
+Coverage teacher diagnostic result:
+
+- Existing coverage teachers are not h200-successful; do not expect expert-v2/v3/v4 DAgger alone to solve coverage.
+- Next action: run `configs/policy/debug_ppo_coverage_factorized_group_h200_stable.yaml` from the original factorized-group coverage BC checkpoint under `configs/env/debug_coverage_completion_focus.yaml`.
+
+Coverage phase43 result:
+
+- Stable h200 PPO from original BC did not exceed the original `0.20` success baseline.
+- Current best canonical h200 factorized-group coverage remains around `success_rate_mean=0.20`.
+- Next route should be reward-only coverage curriculum/shaping or a newly designed high-success h200 coverage teacher; do not repeat expert-v2/v3/v4 DAgger or utility-head PPO as-is.
+
+Coverage ratio-curriculum next:
+
+- Run `configs/policy/debug_ppo_coverage_factorized_group_h200_ratio_curriculum.yaml` from the original factorized-group BC checkpoint under `configs/env/debug_coverage_ratio_curriculum.yaml`.
+- If it improves success above `0.20`, do independent 100-episode eval. If not, coverage remains blocked on high-success h200 expert/curriculum design.
+
+Coverage phase44 result:
+
+- Ratio-curriculum reward-only PPO failed to improve beyond `0.20` baseline; best was `0.1667`.
+- If using lower-threshold curriculum next, mark it explicitly as training-only/diagnostic and validate final checkpoint under canonical `coverage.success_ratio=0.82`, h200.
+
+Coverage milestone PPO next:
+
+- Run `configs/policy/debug_ppo_coverage_factorized_group_h200_milestone.yaml` with `configs/env/debug_coverage_milestone_reward.yaml` from the original factorized-group BC checkpoint.
+- If best 30-episode success exceeds `0.20`, run 100-episode canonical eval. If it fails, coverage remains blocked on stronger curriculum/high-success h200 expert design.
+
+Coverage phase45 canonical validation:
+
+- Milestone PPO is not a canonical repair. Canonical 100-episode success was `0.17` with repeated coverage ratio `0.991`.
+- Next credible route: implement an anti-revisit / frontier-sweep training signal or a high-success h200 teacher, then validate under original `configs/env/coverage.yaml`.
+
+Coverage anti-revisit PPO next:
+
+- Run `configs/policy/debug_ppo_coverage_factorized_group_h200_antirevisit.yaml` with `configs/env/debug_coverage_antirevisit_reward.yaml` from the original factorized-group BC checkpoint.
+- Canonical validation remains mandatory under `configs/env/coverage.yaml`.
+
+Coverage phase46 canonical validation:
+
+- Anti-revisit PPO is not a canonical repair. Canonical 100-episode success is `0.20`, repeated coverage remains `0.99125`.
+- Stop repeating scalar reward-only PPO from the same BC checkpoint.
+- Next credible implementation: add a factorized-group-compatible persistent target/frontier assignment mechanism or create a true high-success h200 coverage teacher, then validate under canonical `configs/env/coverage.yaml`.
+
+Coverage success-heavy BC result:
+
+- Success-only BC from phase46 successful trajectories failed: 50-episode canonical success `0.140`.
+- Stop using current success-only data as the main coverage fix.
+- Next implementation should be architectural but compatible with `factorized_group`: persistent per-agent/group frontier target assignment, or alternatively build a true h200 coverage teacher before BC/PPO.
+
+Post-continuation status:
+
+- Regression tests passed: `26 passed`.
+- Do not claim coverage repaired. Current canonical h200 coverage is still around `0.20` success.
+- Best next coverage route is not another scalar reward tweak; implement persistent per-agent/group frontier targets in the new architecture, or first build a true high-success h200 coverage teacher.
+
+Coverage frontier-slot next:
+
+- Train `configs/policy/debug_bc_coverage_factorized_group_frontier_perm.yaml` on `outputs/debug_long/20260530_factorized_group_continuation/coverage_success_from_phase46_canonical_plus_v3.npz`.
+- If BC canonical eval is not worse than baseline, run `configs/policy/debug_ppo_coverage_factorized_group_frontier.yaml` under canonical or anti-revisit reward and validate with canonical 100 episodes.
+
+Coverage frontier-low next:
+
+- Run `configs/policy/debug_ppo_coverage_factorized_group_frontier_low.yaml` from the original coverage BC checkpoint under anti-revisit reward.
+- If it does not exceed `0.20`, frontier bias as currently implemented should be considered ineffective and the next route should be a better h200 teacher rather than more frontier tuning.
+
+Coverage frontier-low result:
+
+- Phase48 failed and was stopped early. Low-strength frontier bias did not preserve baseline behavior.
+- The next coverage path should be a high-success h200 teacher/trajectory generator, not additional frontier-bias tuning.
+
+Coverage teacher prototype result:
+
+- Local greedy and waypoint-lookahead h200 teacher prototypes failed.
+- If continuing coverage, build an explicit route-planning/sweep teacher or add recurrent/persistent target memory with proper state handling; do not rely on local greedy scoring.
+
+Frontier continuation verification:
+
+- Regression tests passed: `28 passed`.
+- No active training/evaluation process is running.
+- Coverage is still unresolved; current implemented frontier bias is compatible but empirically ineffective.
+
+Documentation update:
+
+- Current explanation of pure PPO unreliability and BC/DAgger necessity is in `docs/specialist_ppo_reliability_zh.md`.
+- Future agents should read that doc before proposing another pure-PPO or scalar reward-only coverage run.
