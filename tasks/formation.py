@@ -132,11 +132,16 @@ class FormationTask(BaseTask):
         radius_error = self._radius_error(env_state["positions"], task_state["target_position"], task_state["radius"])
         stability = 1.0 / (1.0 + float(np.std(env_state["formation_error_history"][-10:] or [error])))
         tolerance = self.config["formation_tolerance"] * env_state["spatial_scale"]
-        success = (
-            error <= tolerance
-            and radius_error <= tolerance
-            and angular_uniformity >= 1.0 - self.config["formation"]["angular_tolerance"]
-        )
+        template = str(task_state.get("template", "circle"))
+        success = error <= tolerance
+        if template in {"circle", "diamond"}:
+            success = (
+                success
+                and radius_error <= tolerance
+                and angular_uniformity >= 1.0 - self.config["formation"]["angular_tolerance"]
+            )
+        elif template == "arc":
+            success = success and radius_error <= tolerance
         return {
             "success": float(success),
             "formation_error": error,

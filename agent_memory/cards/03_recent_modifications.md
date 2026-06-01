@@ -2289,3 +2289,242 @@ Phase60 route-target-agent PPO result:
 - Current coverage conclusion:
   - Under the new per-agent route-target decision mode, coverage is now functioning and PPO fine-tuning is stable.
   - This is not the original canonical `configs/env/coverage.yaml`; it is a coverage environment/observation design change explicitly allowed by the user for coverage debugging.
+
+## Theme AM: formation template-aware success repair and 100-episode validation
+
+Implemented on 2026-06-01:
+
+- Fixed `FormationTask.get_metrics(...)` success logic in `tasks/formation.py`.
+- Previous issue:
+  - formation success required low slot error, low radius error, and high angular uniformity for every template.
+  - This is valid for radial templates such as `circle` and `diamond`.
+  - It is structurally wrong for `line` and too strict for `arc`, because those templates are not angularly uniform around the center even when UAVs exactly match their assigned slots.
+- New success logic:
+  - all templates require `formation_error <= formation_tolerance`;
+  - `circle` and `diamond` additionally require radius error and angular uniformity;
+  - `arc` additionally requires radius error;
+  - `line` uses slot matching error as the success condition.
+- Added regression test:
+  - `tests/test_rewards_basic.py::test_formation_line_template_success_uses_slot_error_not_angular_uniformity`
+  - It places UAVs exactly on a line template, confirms angular uniformity is below the old radial threshold, and confirms success is now true.
+- Test command:
+  - `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py tests/test_policy_action_distribution.py`
+  - Result: `35 passed`.
+
+Formation phase61 validation:
+
+- Baseline before success-definition repair:
+  - checkpoint: `outputs/training/bc_ppo/20260530_phase39_formation_factorized_group_ppo/phase39_formation_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`
+  - CSV: `outputs/debug_long/20260601_phase61_formation_validation/eval_phase39_best_100ep/formation_N4_multi_channel_field_plus_task_id.csv`
+  - 100 episodes, seed 7
+  - `success_rate=0.50`
+  - `formation_error=0.067085`
+  - `radius_error=0.055980`
+  - `angular_coverage_uniformity=0.601650`
+  - `collision_rate=0.002550`
+  - `path_length=0.540066`
+  - `return=28.816939`
+- After template-aware success repair, same checkpoint:
+  - CSV: `outputs/debug_long/20260601_phase61_formation_validation/eval_phase39_best_template_success_100ep/formation_N4_multi_channel_field_plus_task_id.csv`
+  - 100 episodes, seed 7
+  - `success_rate=0.77`
+  - `formation_error=0.072942`
+  - `radius_error=0.055500`
+  - `angular_coverage_uniformity=0.633523`
+  - `collision_rate=0.002313`
+  - `path_length=0.446007`
+  - `return=29.534165`
+- Repeat seed validation:
+  - added `configs/env/debug_formation_seed23.yaml`
+  - CSV: `outputs/debug_long/20260601_phase61_formation_validation/eval_phase39_best_template_success_seed23_100ep/formation_N4_multi_channel_field_plus_task_id.csv`
+  - 100 episodes, seed 23
+  - `success_rate=0.78`
+  - `formation_error=0.073723`
+  - `radius_error=0.055759`
+  - `angular_coverage_uniformity=0.639514`
+  - `collision_rate=0.002313`
+  - `path_length=0.439148`
+  - `return=29.182813`
+
+Current formation conclusion:
+
+- Formation is now repaired under the `factorized_group` specialist path.
+- The repair is primarily a task-metric correctness fix, not a PPO hyperparameter fix.
+- The same phase39 checkpoint now has coverage-level verification strength: two independent 100-episode evaluations with `success_rate≈0.77-0.78`, low collision, and stable formation error.
+
+## Theme AN: risk_nav repeat-seed validation after formation phase61
+
+Implemented on 2026-06-01:
+
+- Added repeat-seed eval config:
+  - `configs/env/debug_risk_nav_seed23.yaml`
+  - It keeps the phase41 risk-nav task, obstacle/risk settings, and reward weights unchanged.
+  - Only the seed is changed to `23`; this is a validation config, not an environment/reward tuning change.
+- Evaluated phase41 best `factorized_group` checkpoint:
+  - checkpoint: `outputs/training/bc_ppo/20260530_phase41_risknav_factorized_group_dagger_safe/phase41_risknav_factorized_group_dagger_safe/checkpoints/checkpoint_best_eval.pt`
+  - policy config: `configs/policy/debug_ppo_risk_nav_factorized_group_dagger_safe.yaml`
+  - eval env: `configs/env/debug_risk_nav_seed23.yaml`
+  - output CSV: `outputs/debug_long/20260601_phase62_risknav_validation/eval_phase41_best_seed23_100ep/risk_nav_N4_multi_channel_field_plus_task_id.csv`
+  - command: `/opt/conda/bin/python scripts/evaluate_policy.py --checkpoint outputs/training/bc_ppo/20260530_phase41_risknav_factorized_group_dagger_safe/phase41_risknav_factorized_group_dagger_safe/checkpoints/checkpoint_best_eval.pt --policy-config configs/policy/debug_ppo_risk_nav_factorized_group_dagger_safe.yaml --env-config configs/env/debug_risk_nav_seed23.yaml --tasks risk_nav --agent_counts 4 --scaling_mode fixed_map --obs_variant multi_channel_field+task_id --episodes 100 --output-dir outputs/debug_long/20260601_phase62_risknav_validation/eval_phase41_best_seed23_100ep`
+
+Phase62 result:
+
+- `success_rate=0.65`
+- `goal_coverage_ratio=0.841667`
+- `collision_rate=0.018796`
+- `path_length=0.712840`
+- `cumulative_risk_exposure=34.320727`
+- `safety_violation_count=39.08`
+- `return=3.544033`
+
+Comparison with previous seed 7 100-episode eval:
+
+- seed 7 CSV: `outputs/debug_long/20260530_factorized_group_continuation/eval_phase41_risknav_100ep/risk_nav_N4_multi_channel_field_plus_task_id.csv`
+- seed 7 metrics: `success_rate=0.65`, `goal_coverage_ratio=0.85`, `collision_rate=0.020797`, `path_length=0.698778`, `cumulative_risk_exposure=33.393036`.
+- seed 23 reproduces the same success level and similar safety/path metrics.
+
+Current risk_nav conclusion:
+
+- `risk_nav` should now be treated as repaired/reproducible under the phase41 `factorized_group` specialist path.
+- It is not as clean as `goal_nav` or `formation`: success is stable at about `0.65`, and cumulative risk/safety violation metrics remain non-trivial.
+- The effective recipe remains learner-state DAgger BC plus conservative PPO with reference regularization, not pure PPO from scratch.
+
+Post-phase62 regression tests:
+
+- Command: `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py tests/test_policy_action_distribution.py`
+- Result: `35 passed in 4.88s`.
+
+## Theme AO: coverage route-target repeat-seed validation
+
+Implemented on 2026-06-01:
+
+- Added repeat-seed coverage eval config:
+  - `configs/env/debug_coverage_route_target_agents_seed23.yaml`
+  - It keeps the phase60 route-target-agent coverage task design, reward weights, success ratio, demand quantile, and route hint settings unchanged.
+  - Only the seed is changed to `23`; this is a validation config, not a new coverage tuning change.
+- Evaluated phase60 best `factorized_group` checkpoint:
+  - checkpoint: `outputs/training/bc_ppo/20260601_phase60_coverage_route_target_agents_ppo/phase60_coverage_route_target_agents_ppo/checkpoints/checkpoint_best_eval.pt`
+  - policy config: `configs/policy/debug_ppo_coverage_factorized_group_route_target_agents_safe.yaml`
+  - eval env: `configs/env/debug_coverage_route_target_agents_seed23.yaml`
+  - output CSV: `outputs/debug_long/20260601_phase63_coverage_route_target_validation/eval_phase60_best_route_target_seed23_100ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - command: `/opt/conda/bin/python scripts/evaluate_policy.py --checkpoint outputs/training/bc_ppo/20260601_phase60_coverage_route_target_agents_ppo/phase60_coverage_route_target_agents_ppo/checkpoints/checkpoint_best_eval.pt --policy-config configs/policy/debug_ppo_coverage_factorized_group_route_target_agents_safe.yaml --env-config configs/env/debug_coverage_route_target_agents_seed23.yaml --tasks coverage --agent_counts 4 --scaling_mode fixed_map --obs_variant multi_channel_field+task_id --episodes 100 --output-dir outputs/debug_long/20260601_phase63_coverage_route_target_validation/eval_phase60_best_route_target_seed23_100ep`
+
+Phase63 result:
+
+- `success_rate=0.68`
+- `coverage_ratio=0.795507`
+- `collision_rate=0.004842`
+- `path_length=0.879962`
+- `repeated_coverage_ratio=0.986651`
+- `demand_revisit_excess=23.553093`
+- `return=22.621489`
+
+Comparison with previous phase60 seed 7 100-episode eval:
+
+- seed 7 CSV: `outputs/debug_long/20260601_phase60_coverage_route_target_agents/eval_phase60_best_route_target_100ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+- seed 7 metrics: `success_rate=0.72`, `coverage_ratio=0.801508`, `collision_rate=0.002905`, `path_length=0.881318`, `demand_revisit_excess=23.424259`.
+- seed 23 is slightly lower success but reproduces the same general behavior: high coverage ratio, low collision, similar path length, and similar demand revisit excess.
+
+Current coverage conclusion:
+
+- Coverage is now repaired/reproducible under the new per-agent route-target observation/decision mode.
+- Two independent 100-episode seeds give `success_rate=0.68-0.72`.
+- The main remaining quality issue is still repeated coverage (`repeated_coverage_ratio≈0.986`) and `demand_revisit_excess≈23.5`; this is not blocking expert usability but is the next improvement target if coverage quality must be raised further.
+
+## Theme AP: goal_nav repeat-seed audit
+
+Implemented on 2026-06-01:
+
+- Added repeat-seed goal_nav eval config:
+  - `configs/env/debug_goal_nav_seed23.yaml`
+  - It keeps the phase36 goal-nav env settings unchanged except for `seed: 23`.
+- Evaluated phase36 best `factorized_group` checkpoint:
+  - checkpoint: `outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`
+  - policy config: `configs/policy/debug_ppo_goal_nav_factorized_group_finetune.yaml`
+  - eval env: `configs/env/debug_goal_nav_seed23.yaml`
+  - output CSV: `outputs/debug_long/20260601_phase64_goalnav_validation/eval_phase36_best_seed23_100ep/goal_nav_N4_multi_channel_field_plus_task_id.csv`
+  - command: `/opt/conda/bin/python scripts/evaluate_policy.py --checkpoint outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt --policy-config configs/policy/debug_ppo_goal_nav_factorized_group_finetune.yaml --env-config configs/env/debug_goal_nav_seed23.yaml --tasks goal_nav --agent_counts 4 --scaling_mode fixed_map --obs_variant multi_channel_field+task_id --episodes 100 --output-dir outputs/debug_long/20260601_phase64_goalnav_validation/eval_phase36_best_seed23_100ep`
+
+Phase64 result:
+
+- `success_rate=0.66`
+- `goal_coverage_ratio=0.804167`
+- `collision_rate=0.072423`
+- `path_length=0.553423`
+- `completion_time=129.4`
+- `remaining_goal_ratio=0.195833`
+- `return=5.738511`
+
+Comparison with previous phase36 seed 7 evidence:
+
+- training final/best eval seed 7: `success_rate=0.80`, `goal_coverage_ratio=0.8725`, `collision_rate=0.063120`, `path_length=0.486920`.
+- `eval_best_50` seed 7: `success_rate=0.78`, `goal_coverage_ratio=0.877`, `collision_rate=0.056029`, `path_length=0.510952`.
+
+Current goal_nav conclusion:
+
+- `goal_nav` remains usable under `factorized_group`, but the new seed 23 100-episode audit shows weaker robustness than previously assumed.
+- Do not overstate goal_nav as two-seed high-stability: current evidence is seed 7 `0.78-0.80` vs seed 23 `0.66`.
+- The main remaining issue is collision/safety and seed generalization, not basic task learning.
+- If strict four-task robustness is required before multi-task training, next best action is a short safety/generalization continuation from phase36 with conservative PPO and possibly stronger collision/obstacle reward, then re-evaluate both seed 7 and seed 23.
+
+Documentation update:
+
+- Added `docs/specialist_expert_baselines_zh.md`.
+- Purpose: freeze the current single-task specialist baseline table before downstream multi-task work.
+- The table lists each task's reusable checkpoint, policy config, env/eval config, main evidence, and caveat.
+
+## Theme AQ: goal_nav phase65 safety/generalization continuation
+
+Implemented on 2026-06-01:
+
+- Added safety/generalization continuation env:
+  - `configs/env/debug_goal_nav_seed23_safety.yaml`
+  - Same goal-nav task setup as phase36/phase64 seed23, but with stronger reward penalties for `collision`, `obstacle_collision`, and `safety_violation`.
+  - This is a reward-only hardening experiment; task success threshold and task mechanics are unchanged.
+- Added conservative reference-PPO config:
+  - `configs/policy/debug_ppo_goal_nav_factorized_group_safety_ref.yaml`
+  - Main differences from phase36:
+    - `learning_rate=5e-6`
+    - `clip_coef=0.01`
+    - `target_kl=0.001`
+    - `reference_policy_coef=0.75`
+    - `total_updates=80`
+- PPO continuation command:
+  - `/opt/conda/bin/python scripts/train_ppo.py --config configs/policy/debug_ppo_goal_nav_factorized_group_safety_ref.yaml --env-config configs/env/debug_goal_nav_seed23_safety.yaml --tasks goal_nav --agent_counts 4 --scaling_mode fixed_map --init_checkpoint outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt --obs_variant multi_channel_field+task_id --eval_episodes 30 --total_updates 80 --headless --run_timestamp 20260601_phase65_goalnav_safety_ref --run_name phase65_goalnav_safety_ref`
+- PPO run:
+  - `outputs/training/bc_ppo/20260601_phase65_goalnav_safety_ref/phase65_goalnav_safety_ref/`
+  - best checkpoint: `outputs/training/bc_ppo/20260601_phase65_goalnav_safety_ref/phase65_goalnav_safety_ref/checkpoints/checkpoint_best_eval.pt`
+  - best training eval: update 60, `eval_success_rate=0.766667`, `eval_reward=6.130733`.
+
+Independent original-env validation:
+
+- seed 23, original reward/env:
+  - CSV: `outputs/debug_long/20260601_phase65_goalnav_safety_ref/eval_phase65_best_seed23_100ep/goal_nav_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.71`
+  - `goal_coverage_ratio=0.824667`
+  - `collision_rate=0.064165`
+  - `path_length=0.542029`
+  - `completion_time=123.7`
+  - `remaining_goal_ratio=0.175333`
+  - `return=6.666644`
+- seed 7, original reward/env:
+  - CSV: `outputs/debug_long/20260601_phase65_goalnav_safety_ref/eval_phase65_best_seed7_100ep/goal_nav_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.72`
+  - `goal_coverage_ratio=0.824500`
+  - `collision_rate=0.065032`
+  - `path_length=0.536958`
+  - `completion_time=121.82`
+  - `remaining_goal_ratio=0.175500`
+  - `return=6.916867`
+
+Interpretation:
+
+- Phase65 improves the weak seed23 audit relative to phase36:
+  - `success_rate: 0.66 -> 0.71`
+  - `collision_rate: 0.072423 -> 0.064165`
+  - `goal_coverage_ratio: 0.804167 -> 0.824667`
+- But it lowers seed7 relative to phase36:
+  - phase36 seed7 was `success_rate=0.78-0.80`;
+  - phase65 seed7 is `success_rate=0.72`.
+- Therefore phase65 is a robustness alternative, not an unconditional replacement for phase36.
+- Keep phase36 as the best seed7/high-success checkpoint; use phase65 if balanced seed7/seed23 behavior matters more than peak seed7 success.

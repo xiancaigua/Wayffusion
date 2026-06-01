@@ -487,3 +487,80 @@ Coverage phase60 final:
   - decide whether to migrate original canonical coverage to include route-target agent features by default, or keep it as a separate expert-training env.
 - Next global task:
   - repeat/validate formation under factorized_group and update the repaired-specialist table, because formation was previously only provisionally repaired.
+
+Formation phase61 final:
+
+- Treat formation as repaired under `factorized_group`.
+- Best checkpoint:
+  - `outputs/training/bc_ppo/20260530_phase39_formation_factorized_group_ppo/phase39_formation_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`
+- Evidence:
+  - seed 7, 100 episodes: `success_rate=0.77`, `collision_rate=0.002313`, `formation_error=0.072942`.
+  - seed 23, 100 episodes: `success_rate=0.78`, `collision_rate=0.002313`, `formation_error=0.073723`.
+- Important note:
+  - The decisive fix was template-aware success evaluation for `line` / `arc`, not retraining.
+  - `line` and `arc` should not be judged by the same full-circle angular-uniformity condition as `circle` / `diamond`.
+- Four-task status after phase61:
+  - `goal_nav`: repaired under factorized_group.
+  - `coverage`: repaired under the new per-agent route-target observation mode.
+  - `risk_nav`: provisionally repaired; best 100-episode evidence remains `success_rate≈0.65`, low collision, but a repeat seed is still recommended.
+  - `formation`: repaired under factorized_group after template-aware success fix.
+- Recommended next action:
+  - run one repeat-seed validation for `risk_nav` to bring it to the same evidence standard as coverage/formation.
+
+Risk_nav phase62 final:
+
+- Repeat-seed validation is complete.
+- Best checkpoint:
+  - `outputs/training/bc_ppo/20260530_phase41_risknav_factorized_group_dagger_safe/phase41_risknav_factorized_group_dagger_safe/checkpoints/checkpoint_best_eval.pt`
+- Evidence:
+  - seed 7, 100 episodes: `success_rate=0.65`, `goal_coverage_ratio=0.85`, `collision_rate=0.020797`, `path_length=0.698778`, `cumulative_risk_exposure=33.393036`.
+  - seed 23, 100 episodes: `success_rate=0.65`, `goal_coverage_ratio=0.841667`, `collision_rate=0.018796`, `path_length=0.712840`, `cumulative_risk_exposure=34.320727`.
+- Treat `risk_nav` as repaired/reproducible under the phase41 `factorized_group` specialist path, with the caveat that safety/risk metrics are still materially worse than the cleaner tasks.
+
+Four-task status after phase62:
+
+- `goal_nav`: repaired under `factorized_group`; prior best independent evidence around `success_rate≈0.78-0.80`.
+- `coverage`: repaired under the new per-agent route-target observation/decision mode; seed 7/23 100-episode evidence `success_rate=0.72/0.68`, `coverage_ratio≈0.80/0.796`, `collision_rate≈0.0029/0.0048`.
+- `risk_nav`: repaired/reproducible under `factorized_group`; two 100-episode seeds both `success_rate=0.65`, low-but-not-zero collision and non-trivial risk exposure.
+- `formation`: repaired under `factorized_group` after template-aware success fix; two 100-episode seeds `success_rate=0.77-0.78`.
+
+Coverage phase63 final:
+
+- Repeat-seed validation is complete.
+- Best checkpoint:
+  - `outputs/training/bc_ppo/20260601_phase60_coverage_route_target_agents_ppo/phase60_coverage_route_target_agents_ppo/checkpoints/checkpoint_best_eval.pt`
+- Evidence:
+  - seed 7, 100 episodes: `success_rate=0.72`, `coverage_ratio=0.801508`, `collision_rate=0.002905`, `path_length=0.881318`, `demand_revisit_excess=23.424259`.
+  - seed 23, 100 episodes: `success_rate=0.68`, `coverage_ratio=0.795507`, `collision_rate=0.004842`, `path_length=0.879962`, `demand_revisit_excess=23.553093`.
+- Treat coverage as repaired/reproducible under the route-target-agent specialist path.
+
+Goal_nav phase64 audit:
+
+- Repeat-seed validation exposed weaker robustness than earlier seed 7 evidence.
+- Best checkpoint remains:
+  - `outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`
+- Evidence:
+  - seed 7 training/final eval: `success_rate=0.80`, `goal_coverage_ratio=0.8725`, `collision_rate=0.063120`, `path_length=0.486920`.
+  - seed 7 independent 50 episodes: `success_rate=0.78`, `goal_coverage_ratio=0.877`, `collision_rate=0.056029`, `path_length=0.510952`.
+  - seed 23 independent 100 episodes: `success_rate=0.66`, `goal_coverage_ratio=0.804167`, `collision_rate=0.072423`, `path_length=0.553423`.
+- Treat goal_nav as usable/repaired for basic expert training, but not as robust as coverage/formation under repeat-seed validation.
+- If more single-task hardening is required, prioritize goal_nav safety/generalization continuation from phase36 before all4 training.
+
+Goal_nav phase65 safety continuation:
+
+- Completed a short conservative continuation from phase36 using `configs/policy/debug_ppo_goal_nav_factorized_group_safety_ref.yaml` and `configs/env/debug_goal_nav_seed23_safety.yaml`.
+- Best run:
+  - `outputs/training/bc_ppo/20260601_phase65_goalnav_safety_ref/phase65_goalnav_safety_ref/checkpoints/checkpoint_best_eval.pt`
+- Independent original-env validation:
+  - seed 23, 100 episodes: `success_rate=0.71`, `goal_coverage_ratio=0.824667`, `collision_rate=0.064165`, `path_length=0.542029`.
+  - seed 7, 100 episodes: `success_rate=0.72`, `goal_coverage_ratio=0.824500`, `collision_rate=0.065032`, `path_length=0.536958`.
+- Interpretation:
+  - phase65 improves the weak seed23 result over phase36 (`0.66 -> 0.71`) and reduces seed23 collision;
+  - phase65 lowers seed7 compared with phase36 (`0.78-0.80 -> 0.72`);
+  - keep phase36 as the peak seed7/high-success checkpoint, and keep phase65 as the balanced robustness alternative.
+
+Recommended next action:
+
+- The four single-task specialists are now repaired/usable enough for downstream multi-task work under the new decision mode, but goal_nav seed robustness and risk_nav safety remain the main caveats.
+- If improving beyond current repaired status, prioritize `goal_nav` seed-robust safety, `risk_nav` safety/risk exposure reduction, and coverage repeat-coverage reduction; do not revisit old non-factorized or shared-waypoint architecture.
+- Before launching all4 multi-task training, create a concise checkpoint/config table for the four specialists and freeze these as expert baselines.

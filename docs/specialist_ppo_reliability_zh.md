@@ -128,3 +128,54 @@ coverage 的问题不是 PPO 完全不能更新，而是缺少稳定的低重复
 同时 `factorized_group` 新增可选 sequential group context：后续 group token 会接收前序 group 输出目标坐标的信息。这保留 centralized critic 和 `[B, N, 2]` joint action 输出，但让 group-level 决策从“并行独立提案”变为“按组有条件提案”，更符合分组航点分配。
 
 还修复了一个重要实验可信度问题：`coverage_frontier_*` 配置此前没有从 policy factory 传入 policy 构造函数，因此 frontier-slot phase 的配置开关实际没有生效。之后所有 frontier 结论需要以修复后的 run 为准。
+
+## 2026-06-01 最新四任务状态
+
+截至 phase63，单任务专家训练结论已经更新如下。旧章节里关于 coverage/formation “仍未调通”的描述是中途状态，应以本节为准。
+
+`goal_nav`：
+
+- 状态：已修通到可用专家，但 repeat-seed robustness 弱于 coverage/formation。
+- 架构：`factorized_group`，centralized critic + per-agent/group waypoint actor，输出仍为 `[B, N, 2]`。
+- 主要原因：goal_nav 的目标结构明确，success/DAgger BC 给 PPO 提供可用初始分布；conservative PPO 保住行为而不是从零探索。
+- 最好 checkpoint：`outputs/training/bc_ppo/20260530_phase36_goalnav_factorized_group_ppo/phase36_goalnav_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`。
+- seed 7 训练/最终评估：`success_rate=0.80`，`goal_coverage_ratio=0.8725`，`collision_rate=0.063120`，`path_length=0.486920`。
+- seed 7 independent 50-episode：`success_rate=0.78`，`goal_coverage_ratio=0.877`，`collision_rate=0.056029`，`path_length=0.510952`。
+- seed 23 independent 100-episode：`success_rate=0.66`，`goal_coverage_ratio=0.804167`，`collision_rate=0.072423`，`path_length=0.553423`。
+- phase65 safety continuation alternative：seed 23 100-episode 提升到 `success_rate=0.71`、`collision_rate=0.064165`，但 seed 7 100-episode 降到 `success_rate=0.72`。
+- 注意：goal_nav 已能训练出专家行为，但 seed 23 结果说明它仍有安全/泛化短板。phase36 是 peak seed7/high-success checkpoint；phase65 是更均衡的 robustness alternative，不是无条件替代。
+
+`coverage`：
+
+- 状态：在新的 per-agent route-target observation/decision mode 下已修通。
+- 关键修改：`include_route_targets_in_agents=true` 时，每个 agent token 追加 route target delta 和 target position，使 actor 能看到“自己当前应坚持的覆盖航点”。
+- 为什么可行：coverage 的主要失败不是不知道高概率区域在哪里，而是缺少跨步持久分工，导致重复覆盖；per-agent route target 把持久目标显式放进 observation，仍保持 centralized 全局信息和 `[B, N, 2]` joint action。
+- 最好 checkpoint：`outputs/training/bc_ppo/20260601_phase60_coverage_route_target_agents_ppo/phase60_coverage_route_target_agents_ppo/checkpoints/checkpoint_best_eval.pt`。
+- seed 7 100-episode：`success_rate=0.72`，`coverage_ratio=0.801508`，`collision_rate=0.002905`，`path_length=0.881318`，`demand_revisit_excess=23.424259`。
+- seed 23 100-episode：`success_rate=0.68`，`coverage_ratio=0.795507`，`collision_rate=0.004842`，`path_length=0.879962`，`demand_revisit_excess=23.553093`。
+- 注意：这不是原始 `configs/env/coverage.yaml` 的无改动 canonical 结果，而是用户允许后的 coverage 任务/observation 设计修复。
+
+`risk_nav`：
+
+- 状态：已修通到可复现的中等成功专家。
+- 关键链路：learner-state DAgger BC + conservative PPO + reference regularization。
+- 为什么可行：risk_nav 同时要求到达和避险，纯 PPO 早期会在“安全但不到达”和“到达但高风险”之间振荡；DAgger 用 learner 自己访问到的状态做 teacher relabel，能修复 BC 的分布偏移。
+- 最好 checkpoint：`outputs/training/bc_ppo/20260530_phase41_risknav_factorized_group_dagger_safe/phase41_risknav_factorized_group_dagger_safe/checkpoints/checkpoint_best_eval.pt`。
+- seed 7 100-episode：`success_rate=0.65`，`goal_coverage_ratio=0.85`，`collision_rate=0.020797`，`path_length=0.698778`，`cumulative_risk_exposure=33.393036`。
+- seed 23 100-episode：`success_rate=0.65`，`goal_coverage_ratio=0.841667`，`collision_rate=0.018796`，`path_length=0.712840`，`cumulative_risk_exposure=34.320727`。
+- 注意：risk_nav 的成功率可复现，但安全/风险暴露还不是很干净；如果继续优化，重点应是降低 risk exposure 和 safety violation，而不是只抬 success。
+
+`formation`：
+
+- 状态：已修通。
+- 关键修复：template-aware success metric。原逻辑对所有模板都要求 radius error 和 angular uniformity，这对 `line` 结构性错误，对 `arc` 过严。
+- 为什么可行：formation policy 已经能把 UAV 放到 slots 附近；失败主要来自 success 判定把 line/arc 当 full-circle radial template 评估。修复没有降低 tolerance，只是让每种模板使用匹配的几何判据。
+- 最好 checkpoint：`outputs/training/bc_ppo/20260530_phase39_formation_factorized_group_ppo/phase39_formation_factorized_group_ppo/checkpoints/checkpoint_best_eval.pt`。
+- seed 7 100-episode：`success_rate=0.77`，`formation_error=0.072942`，`collision_rate=0.002313`，`path_length=0.446007`。
+- seed 23 100-episode：`success_rate=0.78`，`formation_error=0.073723`，`collision_rate=0.002313`，`path_length=0.439148`。
+
+当前总体判断：
+
+- 四个单任务专家都已经在新模式下达到“可训练出专家模型”的状态。
+- coverage、risk_nav、formation 都已经补齐 two-seed 100-episode repeat；goal_nav 也补了 seed 23 100-episode audit，但暴露出 `0.66` 的 seed robustness 短板。
+- 这些结果依赖 BC/DAgger warm-start 和 conservative PPO；纯 PPO 从零仍不可靠，原因是 joint action credit assignment、稀疏成功轨迹和长 horizon 分工问题没有消失。

@@ -334,3 +334,26 @@
 1. 继续 `coverage` 的 success-heavy / DAgger repair
 2. 继续 `formation` 的 success-policy repair
 3. 覆盖这两条后，再刷新 canonical specialist runs 和 verification 文档
+
+## 7. 2026-06-01 phase60-63 更新
+
+本文件前面的状态是早期阶段总结。phase60-63 后，四个单任务专家状态更新为：
+
+- `goal_nav`: 已修通到可用专家，使用 `factorized_group` + success/DAgger warm-start + conservative PPO；phase36 seed 7 为 `0.78-0.80`，但 seed 23 100-episode audit 降到 `0.66`。phase65 safety continuation 把 seed 23 提到 `0.71`，但 seed 7 降到 `0.72`，因此它是 robustness alternative，不是无条件新 best。
+- `coverage`: 已在 per-agent route-target observation/decision mode 下修通；两个 100-episode seed 分别 `success_rate=0.72` 和 `0.68`，coverage ratio 约 `0.80`，collision 低于 `0.005`。
+- `risk_nav`: 已补齐 repeat-seed 验证；seed 7 和 seed 23 的 100-episode `success_rate` 都是 `0.65`，collision 约 `0.019-0.021`。
+- `formation`: 已通过 template-aware success metric 修复；两个 100-episode seed 分别 `success_rate=0.77` 和 `0.78`。
+
+这轮最重要的工程结论是：新决策模式不是“单个共享航点分配所有人”，而是 centralized 信息下的 per-agent/group waypoint actor。critic 仍看全局 state，actor 共享参数但每个 UAV/group 得到自己的 token/context，因此输出是可扩展的 `[B, N, 2]` joint waypoint action。
+
+coverage 的关键变化不是继续调 PPO 小超参，而是把持久 route target 显式编码进每个 agent observation。这样 PPO/BC 学到的是“每个 agent 坚持自己的覆盖路线”，而不是每步从共享 field 里重新抢同一个高值区域。
+
+formation 的关键变化不是降低阈值，而是修复 success 判据：`line` 和 `arc` 不是 full-circle template，不应使用和 `circle/diamond` 相同的 angular-uniformity 条件。
+
+risk_nav 的关键链路仍是 learner-state DAgger：让 teacher 标注 learner 实际访问到的状态，再用 conservative PPO 微调。它已可复现，但如果继续优化，优先目标应是降低 risk exposure / safety violation，而不是只追 success。
+
+如果进入下一轮单任务 hardening，优先级应是：
+
+1. `goal_nav` 从 phase36 做 conservative safety/generalization continuation，并同时复测 seed 7 和 seed 23。
+2. `risk_nav` 降低 risk exposure / safety violation。
+3. `coverage` 降低 repeated coverage 和 demand revisit excess。

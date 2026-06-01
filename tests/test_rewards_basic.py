@@ -359,6 +359,31 @@ def test_coverage_demand_revisit_penalties_are_configurable():
     assert terminal.components["terminal_revisit_excess_penalty"] < 0.0
 
 
+def test_formation_line_template_success_uses_slot_error_not_angular_uniformity():
+    env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "formation"}))
+    env.reset(seed=21)
+    task = env.current_task
+    task_state = deepcopy(env.current_task_state)
+    task_state["template"] = "line"
+    task_state["target_position"] = np.asarray([0.5, 0.5], dtype=np.float32)
+    task_state["radius"] = float(env.config["formation_radius"])
+    task_state["slots"] = task._template_slots(
+        "line",
+        task_state["target_position"],
+        env.num_agents,
+        task_state["radius"],
+        env.runtime_params["map_size"],
+    )
+    env_state = env._snapshot_state()
+    env_state["positions"] = task_state["slots"].copy()
+
+    metrics = task.get_metrics(task_state, env_state)
+
+    assert metrics["formation_error"] == 0.0
+    assert metrics["angular_coverage_uniformity"] < 1.0 - env.config["formation"]["angular_tolerance"]
+    assert metrics["success"] == 1.0
+
+
 def test_risk_nav_high_exposure_produces_negative_task_penalty():
     env = CentralizedMultiUAVEnv(load_env_config("configs/env/multitask.yaml", override={"task_name": "risk_nav"}))
     env.reset(seed=7)
