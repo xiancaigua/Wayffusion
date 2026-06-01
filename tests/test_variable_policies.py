@@ -239,6 +239,111 @@ def test_factorized_group_policy_supports_coverage_frontier_slot_head():
     policy_config["coverage_frontier_slot_strength"] = 0.5
     policy_config["coverage_frontier_pool_size"] = 16
     policy = build_policy(policy_config, env.observation_space, env.action_space)
+    assert policy.use_coverage_frontier_slot_head
+    assert policy.coverage_frontier_slot_strength == 0.5
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action, logprob, entropy, value = policy.get_action_and_value(obs_tensor)
+    assert action.shape == (1, 4, 2)
+    assert logprob.shape == (1,)
+    assert entropy.shape == (1,)
+    assert value.shape == (1,)
+    assert np.all(np.isfinite(action.detach().cpu().numpy()))
+
+
+def test_factorized_group_policy_supports_sequential_group_context():
+    config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 5, "task_name": "coverage"})
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=45)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["policy_class"] = "factorized_group"
+    policy_config["num_groups"] = 3
+    policy_config["group_hidden_dim"] = 96
+    policy_config["group_action_strength"] = 0.5
+    policy_config["use_group_spatial_slots"] = True
+    policy_config["use_sequential_group_context"] = True
+    policy_config["sequential_group_context_strength"] = 0.6
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    assert policy.use_sequential_group_context
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action, logprob, entropy, value = policy.get_action_and_value(obs_tensor)
+    assert action.shape == (1, 5, 2)
+    assert logprob.shape == (1,)
+    assert entropy.shape == (1,)
+    assert value.shape == (1,)
+    assert np.all(np.isfinite(action.detach().cpu().numpy()))
+
+
+def test_factorized_group_policy_supports_coverage_lawnmower_route_head():
+    config = load_env_config("configs/env/multitask.yaml", override={"num_agents": 4, "task_name": "coverage"})
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=46)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["policy_class"] = "factorized_group"
+    policy_config["num_groups"] = 2
+    policy_config["group_hidden_dim"] = 96
+    policy_config["group_action_strength"] = 0.4
+    policy_config["use_coverage_lawnmower_route_head"] = True
+    policy_config["coverage_lawnmower_route_strength"] = 0.5
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    assert policy.use_coverage_lawnmower_route_head
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action, logprob, entropy, value = policy.get_action_and_value(obs_tensor)
+    assert action.shape == (1, 4, 2)
+    assert logprob.shape == (1,)
+    assert entropy.shape == (1,)
+    assert value.shape == (1,)
+    assert np.all(np.isfinite(action.detach().cpu().numpy()))
+
+
+def test_factorized_group_policy_supports_coverage_route_hint_head():
+    config = load_env_config(
+        "configs/env/multitask.yaml",
+        override={
+            "num_agents": 4,
+            "task_name": "coverage",
+            "coverage": {"route_hint_enabled": True},
+        },
+    )
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=48)
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["policy_class"] = "factorized_group"
+    policy_config["num_groups"] = 2
+    policy_config["group_hidden_dim"] = 96
+    policy_config["group_action_strength"] = 0.4
+    policy_config["use_coverage_route_hint_head"] = True
+    policy_config["coverage_route_hint_strength"] = 0.5
+    policy_config["coverage_route_hint_pool_size"] = 16
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
+    assert policy.use_coverage_route_hint_head
+    obs_tensor = observation_to_tensor(observation, device="cpu")
+    action, logprob, entropy, value = policy.get_action_and_value(obs_tensor)
+    assert action.shape == (1, 4, 2)
+    assert logprob.shape == (1,)
+    assert entropy.shape == (1,)
+    assert value.shape == (1,)
+    assert np.all(np.isfinite(action.detach().cpu().numpy()))
+
+
+def test_factorized_group_policy_supports_route_target_agent_features():
+    config = load_env_config(
+        "configs/env/multitask.yaml",
+        override={
+            "num_agents": 4,
+            "task_name": "coverage",
+            "include_route_targets_in_agents": True,
+            "coverage": {"route_hint_enabled": True},
+        },
+    )
+    env = CentralizedMultiUAVEnv(config)
+    observation, _ = env.reset(seed=49)
+    assert observation["agents"].shape[-1] == 10
+    policy_config = load_generic_config("configs/policy/ppo_cnn_deepsets.yaml")
+    policy_config["policy_class"] = "factorized_group"
+    policy_config["num_groups"] = 2
+    policy_config["group_hidden_dim"] = 96
+    policy_config["group_action_strength"] = 0.4
+    policy = build_policy(policy_config, env.observation_space, env.action_space)
     obs_tensor = observation_to_tensor(observation, device="cpu")
     action, logprob, entropy, value = policy.get_action_and_value(obs_tensor)
     assert action.shape == (1, 4, 2)

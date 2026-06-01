@@ -25,6 +25,8 @@ class FactorizedGroupPolicy(CNNDeepSetsPolicy):
         group_assignment_temperature: float = 1.0,
         group_action_strength: float = 0.5,
         use_group_spatial_slots: bool = True,
+        use_sequential_group_context: bool = False,
+        sequential_group_context_strength: float = 0.5,
         **kwargs,
     ):
         super().__init__(observation_space, action_space, **kwargs)
@@ -39,6 +41,8 @@ class FactorizedGroupPolicy(CNNDeepSetsPolicy):
         self.group_assignment_temperature = max(float(group_assignment_temperature), 1e-3)
         self.group_action_strength = float(group_action_strength)
         self.use_group_spatial_slots = bool(use_group_spatial_slots)
+        self.use_sequential_group_context = bool(use_sequential_group_context)
+        self.sequential_group_context_strength = float(sequential_group_context_strength)
 
         self.group_embeddings = nn.Embedding(self.group_count, self.group_hidden_dim)
         self.group_conditioner = nn.Linear(
@@ -55,6 +59,9 @@ class FactorizedGroupPolicy(CNNDeepSetsPolicy):
             self.group_spatial_query = nn.Linear(self.group_hidden_dim, self.field_hidden_dim)
         else:
             self.group_slot_head = nn.Linear(self.group_hidden_dim, 2)
+        if self.use_sequential_group_context:
+            self.previous_group_coord_proj = nn.Linear(2, self.group_hidden_dim)
+            self.previous_group_token_proj = nn.Linear(self.group_hidden_dim, self.group_hidden_dim)
         self.decoder = nn.Sequential(
             nn.Linear(
                 self.agent_hidden_dim
@@ -102,6 +109,37 @@ class FactorizedGroupPolicy(CNNDeepSetsPolicy):
             return torch.einsum("bgt,btc->bgc", weights, spatial_coords)
         return torch.tanh(self.group_slot_head(group_tokens))
 
+    def _group_coordinate_single(
+        self,
+        group_token: torch.Tensor,
+        spatial_tokens: torch.Tensor | None,
+        spatial_coords: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return self._group_coordinates(group_token.unsqueeze(1), spatial_tokens, spatial_coords).squeeze(1)
+
+    def _condition_group_sequence(
+        self,
+        group_tokens: torch.Tensor,
+        spatial_tokens: torch.Tensor | None,
+        spatial_coords: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_sequential_group_context or self.group_count <= 1:
+            return group_tokens, self._group_coordinates(group_tokens, spatial_tokens, spatial_coords)
+
+        conditioned_tokens = []
+        group_coords = []
+        previous_context = torch.zeros_like(group_tokens[:, 0, :])
+        strength = self.sequential_group_context_strength
+        for group_idx in range(self.group_count):
+            current_token = group_tokens[:, group_idx, :] + strength * previous_context
+            current_coord = self._group_coordinate_single(current_token, spatial_tokens, spatial_coords)
+            conditioned_tokens.append(current_token)
+            group_coords.append(current_coord)
+            previous_context = torch.tanh(
+                self.previous_group_coord_proj(current_coord) + self.previous_group_token_proj(current_token)
+            )
+        return torch.stack(conditioned_tokens, dim=1), torch.stack(group_coords, dim=1)
+
     def forward(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         field_map = self.field_encoder(obs["task_field"])
         field_feat = self.field_global_pool(field_map)
@@ -134,7 +172,7 @@ class FactorizedGroupPolicy(CNNDeepSetsPolicy):
         expanded_global = global_feat.unsqueeze(1).expand(batch_size, num_agents, -1)
 
         group_tokens = self._group_tokens(state_feat, task_feat, global_feat)
-        group_coords = self._group_coordinates(group_tokens, spatial_tokens, spatial_coords)
+        group_tokens, group_coords = self._condition_group_sequence(group_tokens, spatial_tokens, spatial_coords)
         actor_parts = [agent_tokens]
         if spatial_context is not None:
             actor_parts.append(spatial_context)
@@ -162,6 +200,10 @@ class FactorizedGroupPolicy(CNNDeepSetsPolicy):
             mean = mean + self._coverage_utility_slot_bias(obs, agent_mask)
         if self.use_coverage_frontier_slot_head and self.coverage_frontier_slot_strength > 0.0:
             mean = mean + self._coverage_frontier_slot_bias(obs, agent_mask)
+        if self.use_coverage_lawnmower_route_head and self.coverage_lawnmower_route_strength > 0.0:
+            mean = mean + self._coverage_lawnmower_route_bias(obs, agent_mask)
+        if self.use_coverage_route_hint_head and self.coverage_route_hint_strength > 0.0:
+            mean = mean + self._coverage_route_hint_bias(obs, agent_mask)
         if self.use_spatial_action_head and self.spatial_action_strength > 0.0 and spatial_tokens is not None and spatial_coords is not None:
             mean = mean + self._spatial_action_bias(
                 obs,

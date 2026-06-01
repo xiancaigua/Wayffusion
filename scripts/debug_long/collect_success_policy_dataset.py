@@ -120,6 +120,8 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=5200)
     parser.add_argument("--action_noise_std", type=float, default=0.0)
+    parser.add_argument("--max_demand_revisit_excess", type=float, default=None)
+    parser.add_argument("--max_repeated_coverage_ratio", type=float, default=None)
     args = parser.parse_args()
 
     task_names = normalize_task_names(args.tasks)
@@ -186,6 +188,8 @@ def main() -> None:
                 "success": float(success),
                 "return": total_reward,
                 "coverage_ratio": float(info.get("coverage_ratio", 0.0)),
+                "repeated_coverage_ratio": float(info.get("repeated_coverage_ratio", 0.0)),
+                "demand_revisit_excess": float(info.get("demand_revisit_excess", 0.0)),
                 "collision_rate": float(info.get("collision_rate", 0.0)),
                 "path_length": float(info.get("path_length", 0.0)),
                 "steps": step,
@@ -194,6 +198,10 @@ def main() -> None:
         )
         attempts += 1
         if not success:
+            continue
+        if args.max_demand_revisit_excess is not None and float(info.get("demand_revisit_excess", 0.0)) > float(args.max_demand_revisit_excess):
+            continue
+        if args.max_repeated_coverage_ratio is not None and float(info.get("repeated_coverage_ratio", 0.0)) > float(args.max_repeated_coverage_ratio):
             continue
         if len(payload["action"]) + len(episode_payload["action"]) > int(args.max_samples):
             break
@@ -222,6 +230,10 @@ def main() -> None:
         "mean_success_return": float(np.mean([row["return"] for row in summaries if row["success"] > 0.5])),
         "mean_success_path_length": float(np.mean([row["path_length"] for row in summaries if row["success"] > 0.5])),
         "mean_success_collision_rate": float(np.mean([row["collision_rate"] for row in summaries if row["success"] > 0.5])),
+        "mean_success_repeated_coverage_ratio": float(np.mean([row["repeated_coverage_ratio"] for row in summaries if row["success"] > 0.5])),
+        "mean_success_demand_revisit_excess": float(np.mean([row["demand_revisit_excess"] for row in summaries if row["success"] > 0.5])),
+        "max_demand_revisit_excess": None if args.max_demand_revisit_excess is None else float(args.max_demand_revisit_excess),
+        "max_repeated_coverage_ratio": None if args.max_repeated_coverage_ratio is None else float(args.max_repeated_coverage_ratio),
     }
     _atomic_write_text(output_path.with_suffix(".summary.json"), json.dumps(summary, indent=2, sort_keys=True) + "\n")
     _atomic_write_text(output_path.with_suffix(".episodes.json"), json.dumps(summaries, indent=2, sort_keys=True) + "\n")

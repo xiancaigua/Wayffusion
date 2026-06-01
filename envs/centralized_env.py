@@ -83,9 +83,15 @@ class CentralizedMultiUAVEnv(gym.Env):
             ),
             (self.num_agents, 1),
         )
+        if bool(self.config.get("include_route_targets_in_agents", False)):
+            extra_low = np.tile(np.array([-1.0, -1.0, 0.0, 0.0], dtype=np.float32), (self.num_agents, 1))
+            extra_high = np.tile(np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32), (self.num_agents, 1))
+            agent_low = np.concatenate([agent_low, extra_low], axis=-1)
+            agent_high = np.concatenate([agent_high, extra_high], axis=-1)
         # Observation contract used by all policies:
         # - task_field: spatial task channels [C, H, W]
         # - agents: per-UAV state [x, y, vx, vy, battery, role_id]
+        #   optionally followed by coverage route target delta/position hints
         # - task_id: one-hot task family id, optionally zeroed for ablations
         # - global_info: compact scalar progress / safety summary
         self.observation_space = spaces.Dict(
@@ -94,7 +100,7 @@ class CentralizedMultiUAVEnv(gym.Env):
                 "agents": spaces.Box(
                     low=agent_low,
                     high=agent_high,
-                    shape=(self.num_agents, 6),
+                    shape=agent_low.shape,
                     dtype=np.float32,
                 ),
                 "task_id": spaces.Box(low=0.0, high=1.0, shape=(len(TASK_ORDER),), dtype=np.float32),
@@ -350,6 +356,17 @@ class CentralizedMultiUAVEnv(gym.Env):
             [self.state["positions"], self.state["velocities"], self.state["battery"], self.state["roles"]],
             axis=-1,
         ).astype(np.float32)
+        if bool(self.config.get("include_route_targets_in_agents", False)):
+            route_targets = None
+            if isinstance(self.current_task_state, dict):
+                route_targets = self.current_task_state.get("route_hint_targets")
+            if route_targets is None or np.asarray(route_targets).shape != self.state["positions"].shape:
+                route_targets = self.state["positions"]
+            route_targets = np.asarray(route_targets, dtype=np.float32)
+            map_size = max(float(self.runtime_params["map_size"]), 1e-6)
+            target_delta = np.clip((route_targets - self.state["positions"]) / map_size, -1.0, 1.0)
+            target_norm = np.clip(route_targets / map_size, 0.0, 1.0)
+            agents = np.concatenate([agents, target_delta, target_norm], axis=-1).astype(np.float32)
         task_id = np.zeros((len(TASK_ORDER),), dtype=np.float32)
         if self.include_task_id:
             task_id[TASK_NAME_TO_ID[self.current_task.name]] = 1.0

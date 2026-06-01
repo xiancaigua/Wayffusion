@@ -58,6 +58,41 @@ def test_all_tasks_share_same_task_field_shape():
             assert info["full_task_field"][CHANNEL_INDEX["formation_template"]].sum() > 0.0
 
 
+def test_coverage_route_hint_uses_formation_template_channel_when_enabled():
+    env = CentralizedMultiUAVEnv(
+        _env_config(
+            coverage={
+                "route_hint_enabled": True,
+                "route_hint_stride": 3,
+                "route_hint_sigma": 0.04,
+            }
+        )
+    )
+    _, info = env.reset(seed=14)
+    route_hint = info["full_task_field"][CHANNEL_INDEX["formation_template"]]
+    assert route_hint.shape == (env.grid_size, env.grid_size)
+    assert float(route_hint.sum()) > 0.0
+    assert env.current_task_state["route_hint_routes"] is not None
+    assert len(env.current_task_state["route_hint_routes"]) == env.num_agents
+
+
+def test_coverage_route_targets_can_be_appended_to_agent_observation():
+    env = CentralizedMultiUAVEnv(
+        _env_config(
+            include_route_targets_in_agents=True,
+            coverage={"route_hint_enabled": True},
+        )
+    )
+    obs, _ = env.reset(seed=15)
+    assert obs["agents"].shape == (env.num_agents, 10)
+    assert env.observation_space["agents"].shape == (env.num_agents, 10)
+    assert np.all(np.isfinite(obs["agents"]))
+    assert np.all(obs["agents"][:, 6:8] >= -1.0)
+    assert np.all(obs["agents"][:, 6:8] <= 1.0)
+    assert np.all(obs["agents"][:, 8:10] >= 0.0)
+    assert np.all(obs["agents"][:, 8:10] <= 1.0)
+
+
 def test_drop_channels_and_agent_density_toggle_zero_out_channels():
     env = CentralizedMultiUAVEnv(
         _env_config(

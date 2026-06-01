@@ -1667,3 +1667,625 @@ Content:
 Reason:
 
 - The user asked to preserve the recent analysis in both memory and docs so future agents can reuse the rationale instead of repeating failed PPO-only or reward-only attempts.
+
+## Theme BJ: coverage training curriculum v1
+
+Implemented:
+
+- `tasks/coverage.py` now supports optional `coverage.demand_quantile`; default remains `0.55`.
+- Added `configs/env/debug_coverage_train_curriculum_v1.yaml` with coverage-specific training environment/reward curriculum.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_train_curriculum_v1.yaml`.
+- Added `test_coverage_demand_quantile_controls_demand_area`.
+
+Reason:
+
+- User now allows coverage-specific training environment and reward design changes.
+- Canonical h200 coverage has not converged with reward-only scalar tweaks or frontier bias.
+- Curriculum v1 narrows demand area, extends training horizon to 260, and strengthens completion/anti-repeat reward to bootstrap successful behavior.
+
+Verification:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py`
+- Result: `26 passed`.
+
+## Theme BK: coverage phase49 curriculum v1 converged in modified training env
+
+Experiment:
+
+- Ran `phase49_coverage_train_curriculum_v1` from original factorized-group coverage BC checkpoint.
+- Run: `outputs/training/bc_ppo/20260531_phase49_coverage_train_curriculum_v1/phase49_coverage_train_curriculum_v1/`.
+
+Result:
+
+- Training-env success rose from `0.60` at update 20 to `0.733` at update 60/160.
+- Independent training-env 100-episode eval: `success_rate_mean=0.73`, `coverage_ratio_mean=0.742`, `return_mean=116.729`.
+- Canonical 100-episode eval: `success_rate_mean=0.14`, `coverage_ratio_mean=0.712`.
+
+Reasoning:
+
+- Coverage PPO can converge when the coverage-specific training env is made curriculum-friendly.
+- This is not yet a canonical repair; it should be used as a curriculum stage before a closer-to-canonical bridge.
+
+## Theme BL: coverage curriculum v2 bridge config
+
+Implemented:
+
+- Added `configs/env/debug_coverage_train_curriculum_v2_bridge.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_train_curriculum_v2_bridge.yaml`.
+
+Reason:
+
+- Phase49 converged in the easier curriculum env but did not transfer to canonical.
+- V2 bridge moves closer to canonical by using demand quantile `0.60`, success ratio `0.80`, and max steps `240`.
+
+## Theme BM: coverage phase50 bridge curriculum result
+
+Experiment:
+
+- Ran `phase50_coverage_train_curriculum_v2_bridge` from phase49 best checkpoint.
+- Run: `outputs/training/bc_ppo/20260531_phase50_coverage_train_curriculum_v2_bridge/phase50_coverage_train_curriculum_v2_bridge/`.
+
+Result:
+
+- Bridge 100-episode eval: `success_rate_mean=0.56`, `coverage_ratio_mean=0.744`, `return_mean=59.100`, `collision_rate_mean=0.00323`.
+- Canonical 100-episode eval: `success_rate_mean=0.13`, `coverage_ratio_mean=0.716`, `return_mean=9.777`.
+
+Reasoning:
+
+- Modified coverage training env can produce rising reward/success, but transfer to canonical h200 remains weak.
+- As the curriculum approaches canonical, success falls, confirming that canonical coverage still needs stronger environment/reward redesign or route-planning supervision.
+
+## Theme BN: coverage curriculum regression test
+
+Verification:
+
+- Ran `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py tests/test_bc_permutation_loss.py tests/test_expert_dataset.py tests/test_ppo_episode_budget.py`.
+- Result: `29 passed`.
+- No active training/evaluation process remained after phase50 and evaluations.
+
+## Theme BO: coverage anti-repeat reward and sequential group actor
+
+Implemented:
+
+- `tasks/coverage.py` now exposes two optional anti-revisit reward terms:
+  - `reward_weights.coverage.repeated_demand_coverage`: per-step penalty for covering already-fulfilled demand cells, normalized by demand area.
+  - `reward_weights.coverage.terminal_revisit_excess`: terminal penalty for cumulative excess demand visits, reported by new metric `demand_revisit_excess`.
+- `policies/factorized_group_policy.py` now supports optional sequential group conditioning:
+  - `use_sequential_group_context: true`
+  - `sequential_group_context_strength`
+  - Later group tokens are conditioned on previous group target coordinates, so group decisions are no longer independent when this option is enabled.
+- Fixed policy factory propagation for `coverage_frontier_*` options. Before this fix, frontier-slot configs constructed a valid policy but did not actually enable the frontier head.
+- Added `configs/env/debug_coverage_train_curriculum_v3_antirepeat.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_seq_frontier_antirepeat.yaml`.
+- Added tests for configurable demand revisit penalties and sequential group context.
+
+Reasoning:
+
+- Previous canonical/bridge coverage runs had `repeated_coverage_ratio≈0.99`, so policies learned to sit in or revisit already covered areas while still receiving partial coverage reward.
+- The new per-step demand revisit term gives dense negative feedback exactly when a policy wastes coverage radius on already-fulfilled demand cells.
+- The new terminal revisit-excess term separates “same final coverage with efficient sweep” from “same final coverage after excessive revisits”.
+- Sequential group conditioning implements the user-requested grouped decision mode where later group decisions can see earlier group outputs while preserving centralized critic, shared per-agent decoder, `[B, N, 2]` output, `agent_mask`, and variable-N support.
+- The frontier factory fix means future frontier experiments are now real; earlier frontier phase47/48 results should be interpreted cautiously because the config knobs were not actually wired through.
+
+Verification:
+
+- `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py tests/test_policy_action_distribution.py`
+- Result: `31 passed`.
+- Checkpoint compatibility probe from phase50 best into the new sequential policy succeeded with only the 4 new sequential projection parameters missing.
+- 2-update PPO smoke:
+  - Run: `outputs/training/bc_ppo/20260601_phase51_smoke/phase51_smoke_seq_frontier_antirepeat/`
+  - Init: phase50 best checkpoint.
+  - Result: training/eval path completed; 2-episode eval `success_rate=0.50`, `collision_rate=0.0`, return negative because anti-repeat penalties are intentionally much stronger.
+
+Long experiment launched:
+
+- Phase51 run command started with `setsid`.
+- PID file: `outputs/debug_long/20260601_phase51_coverage_seq_frontier_antirepeat/train.pid`.
+- Log file: `outputs/debug_long/20260601_phase51_coverage_seq_frontier_antirepeat/train.log`.
+- Expected run dir: `outputs/training/bc_ppo/20260601_phase51_coverage_seq_frontier_antirepeat/phase51_coverage_seq_frontier_antirepeat/`.
+- Init checkpoint: phase50 bridge best.
+- Configs:
+  - `configs/env/debug_coverage_train_curriculum_v3_antirepeat.yaml`
+  - `configs/policy/debug_ppo_coverage_factorized_group_seq_frontier_antirepeat.yaml`
+
+Phase51 early stop:
+
+- Stopped at update 45 after update 40 eval showed no recovery.
+- Update 20 eval: `success_rate=0.133`, `coverage_ratio=0.696479`, `repeated_coverage_ratio=0.991442`, `demand_revisit_excess=31.645258`.
+- Update 40 eval: `success_rate=0.133`, `coverage_ratio=0.696357`, `repeated_coverage_ratio=0.991393`, `demand_revisit_excess=31.673179`.
+- Interpretation: turning on real frontier bias plus new sequential parameters plus very large terminal revisit-excess penalty perturbed the phase50 checkpoint too much and did not reduce repeated coverage.
+
+Implemented phase52:
+
+- Added `configs/env/debug_coverage_train_curriculum_v3_moderate_antirepeat.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_seq_moderate_antirepeat.yaml`.
+- Differences from phase51:
+  - frontier slot disabled to preserve the phase50 behavior distribution;
+  - sequential group context kept but weakened to `0.15`;
+  - anti-repeat reward remains active but terminal dominance is reduced:
+    - `repeated_coverage=-0.35`
+    - `repeated_demand_coverage=-2.0`
+    - `terminal_repeated_coverage=-18.0`
+    - `terminal_revisit_excess=-3.0`
+- Reason: phase51 proved that huge terminal penalties create value noise and do not teach mid-episode retargeting. Phase52 tests whether weak sequential conditioning plus moderate dense revisit cost can improve without destroying the phase50 bridge policy.
+
+Phase52 launched:
+
+- PID file: `outputs/debug_long/20260601_phase52_coverage_seq_moderate_antirepeat/train.pid`.
+- Log file: `outputs/debug_long/20260601_phase52_coverage_seq_moderate_antirepeat/train.log`.
+- Expected run dir: `outputs/training/bc_ppo/20260601_phase52_coverage_seq_moderate_antirepeat/phase52_coverage_seq_moderate_antirepeat/`.
+
+Phase52 early stop and control eval:
+
+- Phase52 was stopped after update 20 because eval stayed poor:
+  - `success_rate=0.1667`
+  - `coverage_ratio=0.718132`
+  - `repeated_coverage_ratio=0.991589`
+  - `demand_revisit_excess=29.152401`
+- Control eval of the unchanged phase50 policy on the same `v3_moderate_antirepeat` env:
+  - CSV: `outputs/debug_long/20260601_phase52_coverage_seq_moderate_antirepeat/eval_phase50_on_v3_moderate_30ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.50`
+  - `coverage_ratio=0.747009`
+  - `repeated_coverage_ratio=0.991306`
+  - `demand_revisit_excess=28.143183`
+  - `return=-64.43454`
+- Interpretation: the moderate anti-repeat environment itself preserves phase50 behavior; the weak sequential group context still perturbs the checkpoint enough to damage success.
+
+Implemented phase53:
+
+- Added `configs/policy/debug_ppo_coverage_factorized_group_moderate_antirepeat.yaml`.
+- This keeps the original factorized-group architecture from phase50 and trains only under the moderate anti-repeat reward.
+- Reason: first establish whether the reward change can improve phase50 without architecture perturbation. If yes, sequential group context should be added later via BC/refit or a gated zero-init path, not by direct PPO warm-start with random new parameters.
+
+Phase53 launched:
+
+- PID file: `outputs/debug_long/20260601_phase53_coverage_moderate_antirepeat/train.pid`.
+- Log file: `outputs/debug_long/20260601_phase53_coverage_moderate_antirepeat/train.log`.
+- Expected run dir: `outputs/training/bc_ppo/20260601_phase53_coverage_moderate_antirepeat/phase53_coverage_moderate_antirepeat/`.
+
+Phase53 early stop:
+
+- Stopped after update 40 eval failed to recover to the phase50 control.
+- Update 20: `success_rate=0.3667`, `coverage_ratio=0.738746`, `repeated_coverage_ratio=0.990699`, `demand_revisit_excess=28.518539`.
+- Update 40: `success_rate=0.3667`, `coverage_ratio=0.729345`, `repeated_coverage_ratio=0.990817`, `demand_revisit_excess=28.495747`.
+- Interpretation: moderate anti-repeat PPO without architecture changes is less damaging than phase51/52 but still drifts below the phase50 control (`success=0.50`) and does not reduce revisit metrics enough.
+
+Implemented phase54:
+
+- Added `configs/policy/debug_ppo_coverage_factorized_group_moderate_antirepeat_safe.yaml`.
+- Same architecture and env as phase53, but more conservative PPO:
+  - `learning_rate=2e-6`
+  - `reference_policy_coef=1.0`
+  - `clip_coef=0.01`
+  - `target_kl=0.0008`
+  - `max_grad_norm=0.35`
+  - `log_std_max=-1.25`
+- Reason: phase53 shows PPO is moving the policy out of the success basin faster than anti-repeat reward can improve routing. Phase54 tests whether tighter behavior regularization can preserve phase50 success while allowing slow reward adaptation.
+
+Phase54 launched:
+
+- PID file: `outputs/debug_long/20260601_phase54_coverage_moderate_antirepeat_safe/train.pid`.
+- Log file: `outputs/debug_long/20260601_phase54_coverage_moderate_antirepeat_safe/train.log`.
+- Expected run dir: `outputs/training/bc_ppo/20260601_phase54_coverage_moderate_antirepeat_safe/phase54_coverage_moderate_antirepeat_safe/`.
+
+Phase54 interim result:
+
+- Update 20: `success_rate=0.4667`, `coverage_ratio=0.745157`, `repeated_coverage_ratio=0.990504`, `demand_revisit_excess=27.586895`, `return=-75.093002`.
+- Update 40: `success_rate=0.5000`, `coverage_ratio=0.746011`, `repeated_coverage_ratio=0.990377`, `demand_revisit_excess=27.777411`, `return=-64.570771`.
+- Update 60: `success_rate=0.5333`, `coverage_ratio=0.743630`, `repeated_coverage_ratio=0.990713`, `demand_revisit_excess=27.829508`, `return=-53.686137`.
+- Interpretation:
+  - Conservative PPO finally preserves and slightly improves phase50 bridge success (`0.50 -> 0.5333`).
+  - Return improves under the anti-repeat reward.
+  - Revisit metrics are only slightly better than the phase50 control (`demand_revisit_excess≈28.14`) and remain high, so this is not a complete coverage fix yet.
+  - Continue phase54 to completion, then run independent 100-episode eval on `v3_moderate_antirepeat` and canonical `configs/env/coverage.yaml`.
+
+Phase54 stopped and independently evaluated:
+
+- Stopped after update 100 drifted down (`success_rate=0.4333`) from the best update 60.
+- Best checkpoint remained update 60:
+  - `outputs/training/bc_ppo/20260601_phase54_coverage_moderate_antirepeat_safe/phase54_coverage_moderate_antirepeat_safe/checkpoints/checkpoint_best_eval.pt`
+- Independent v3 moderate 100-episode eval:
+  - CSV: `outputs/debug_long/20260601_phase54_coverage_moderate_antirepeat_safe/eval_phase54_best_v3_moderate_100ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.56`
+  - `coverage_ratio=0.745690`
+  - `repeated_coverage_ratio=0.990990`
+  - `demand_revisit_excess=27.358407`
+  - `return=-44.033868`
+  - `collision_rate=0.003417`
+  - `path_length=1.166319`
+- Phase50 control on the same v3 moderate env was:
+  - `success_rate=0.50`
+  - `coverage_ratio=0.747009`
+  - `repeated_coverage_ratio=0.991306`
+  - `demand_revisit_excess=28.143183`
+  - `return=-64.434540`
+- Independent canonical 100-episode eval:
+  - CSV: `outputs/debug_long/20260601_phase54_coverage_moderate_antirepeat_safe/eval_phase54_best_canonical_100ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.12`
+  - `coverage_ratio=0.711085`
+  - `repeated_coverage_ratio=0.991357`
+  - `demand_revisit_excess=25.194444`
+  - `return=9.568191`
+  - `collision_rate=0.002713`
+  - `path_length=1.099539`
+- Phase50 canonical transfer was `success_rate=0.13`, `coverage_ratio=0.716001`, so phase54 improves the modified training env but does not improve canonical transfer.
+
+Conclusion:
+
+- The safe anti-repeat PPO recipe is the best modified-env continuation so far for coverage (`v3_moderate` 100-episode success `0.56`).
+- It is not a canonical repair. Canonical h200 remains around `0.12-0.13` success.
+- Sequential group context cannot be introduced by direct PPO warm-start with random new parameters; it needs BC/refit or a zero-impact/gated initialization before PPO.
+
+Implemented phase55:
+
+- Added `configs/env/debug_coverage_train_curriculum_v4_canonical_bridge.yaml`.
+- Added `configs/policy/debug_ppo_coverage_factorized_group_canonical_bridge_safe.yaml`.
+- Purpose: continue from phase54 best toward canonical coverage:
+  - `max_steps=220`
+  - `success_ratio=0.81`
+  - `demand_quantile=0.55`
+  - moderate anti-repeat rewards retained but weaker than v3
+  - same conservative PPO settings as phase54.
+- Verification:
+  - `/opt/conda/bin/python -m pytest -q tests/test_rewards_basic.py tests/test_variable_policies.py tests/test_policy_action_distribution.py`
+  - Result: `31 passed`.
+
+Phase55 launched:
+
+- PID file: `outputs/debug_long/20260601_phase55_coverage_canonical_bridge_safe/train.pid`.
+- Log file: `outputs/debug_long/20260601_phase55_coverage_canonical_bridge_safe/train.log`.
+- Expected run dir: `outputs/training/bc_ppo/20260601_phase55_coverage_canonical_bridge_safe/phase55_coverage_canonical_bridge_safe/`.
+- Init checkpoint: phase54 best.
+
+Phase55 result:
+
+- Run completed:
+  - `outputs/training/bc_ppo/20260601_phase55_coverage_canonical_bridge_safe/phase55_coverage_canonical_bridge_safe/`
+- Best checkpoint:
+  - `outputs/training/bc_ppo/20260601_phase55_coverage_canonical_bridge_safe/phase55_coverage_canonical_bridge_safe/checkpoints/checkpoint_best_eval.pt`
+  - best update `100`
+- Best/final 30-episode bridge eval:
+  - `success_rate=0.30`
+  - `coverage_ratio=0.725249`
+  - `repeated_coverage_ratio=0.991341`
+  - `demand_revisit_excess=27.166739`
+  - `return=-99.392137`
+  - `collision_rate=0.002576`
+- Interpretation:
+  - Phase55 is not an improvement over phase54's v3-moderate 100-episode result (`success_rate=0.56`).
+  - It does show partial bridge transfer above canonical (`0.30` vs canonical `0.12`), but the closer-to-canonical demand/horizon still breaks most successful completion behavior.
+  - Revisit metrics remain high. The remaining issue is not just scalar reward weight; the policy lacks a robust route/sweep behavior under wider demand.
+
+Next implication:
+
+- Stop pure PPO continuation as the main coverage path.
+- Move to data-side repair: collect successful and preferably lower-revisit trajectories from phase54/phase55 environments, then BC/refit before any further PPO.
+
+Phase56 data-side repair attempt:
+
+- Enhanced `scripts/debug_long/collect_success_policy_dataset.py`:
+  - added `--max_demand_revisit_excess`
+  - added `--max_repeated_coverage_ratio`
+  - summary now records mean successful `repeated_coverage_ratio` and `demand_revisit_excess`.
+- Collected phase54 v3-moderate low-revisit success data:
+  - dataset: `outputs/debug_long/20260601_phase56_coverage_low_revisit_data/phase54_v3_success_lowrevisit.npz`
+  - summary: `outputs/debug_long/20260601_phase56_coverage_low_revisit_data/phase54_v3_success_lowrevisit.summary.json`
+  - `30` successful episodes from `140` attempts
+  - `4848` samples
+  - mean successful `demand_revisit_excess=27.160990`
+  - mean successful `repeated_coverage_ratio=0.990324`
+  - mean successful collision `0.0000406`
+- Collected phase55 v4-bridge low-revisit success data:
+  - dataset: `outputs/debug_long/20260601_phase56_coverage_low_revisit_data/phase55_v4_success_lowrevisit.npz`
+  - summary: `outputs/debug_long/20260601_phase56_coverage_low_revisit_data/phase55_v4_success_lowrevisit.summary.json`
+  - `20` successful episodes from `112` attempts
+  - `3453` samples
+  - mean successful `demand_revisit_excess=25.644311`
+  - mean successful `repeated_coverage_ratio=0.990960`
+  - mean successful collision `0.000100`
+- Merged data:
+  - dataset: `outputs/debug_long/20260601_phase56_coverage_low_revisit_data/coverage_phase54_phase55_lowrevisit_success_merged.npz`
+  - `8301` samples.
+- Warm-start BC/refit:
+  - init checkpoint: phase54 best
+  - config: `configs/policy/debug_bc_coverage_factorized_group_perm.yaml`
+  - dataset: merged low-revisit success data above
+  - run: `outputs/training/bc/20260601_021316/debug_bc_coverage_factorized_group_perm_coverage_N4_multi_channel_field_plus_task_id/`
+  - v4 bridge final eval: `success_rate=0.30`, `coverage_ratio=0.725430`, `demand_revisit_excess=27.419515`, `return=-100.167997`.
+
+Conclusion:
+
+- Low-revisit success-only BC from current policy did not improve over phase55.
+- It mostly reproduces the same partial bridge behavior.
+- Next coverage route needs a stronger teacher/route-planning data source rather than more current-policy success filtering.
+
+Phase57 sweep teacher diagnostic:
+
+- Added `CoverageExpertV5` in `scripts/debug_long/generate_coverage_expert_v2_dataset.py`.
+- V5 is a diagnostic stateful lawnmower/stripe-sweep teacher:
+  - partitions demand cells into x-stripes;
+  - assigns one persistent route per agent;
+  - follows the route until local demand is fulfilled;
+  - includes simple repulsion for collision avoidance.
+- 50-episode diagnostic rollout:
+  - v4 bridge env:
+    - `success=0.82`
+    - `coverage_ratio=0.802366`
+    - `repeated_coverage_ratio=0.985556`
+    - `demand_revisit_excess=23.714672`
+    - `collision_rate=0.0`
+    - `path_length=0.876563`
+  - canonical env:
+    - `success=0.66`
+    - `coverage_ratio=0.804135`
+    - `repeated_coverage_ratio=0.985571`
+    - `demand_revisit_excess=23.708844`
+    - `collision_rate=0.0`
+    - `path_length=0.880012`
+- Generated formal V5 datasets:
+  - bridge: `outputs/debug_long/20260601_phase57_coverage_sweep_teacher/v5_bridge_e100.npz`
+    - terminal success `0.80`
+    - `17160` samples
+  - canonical: `outputs/debug_long/20260601_phase57_coverage_sweep_teacher/v5_canonical_e100.npz`
+    - terminal success `0.63`
+    - `16979` samples
+  - merged: `outputs/debug_long/20260601_phase57_coverage_sweep_teacher/v5_bridge_canonical_e200_merged.npz`
+    - `34139` samples
+    - terminal success `0.715`
+- BC on V5 merged data:
+  - init: phase54 best
+  - config: `configs/policy/debug_bc_coverage_factorized_group_perm.yaml`
+  - run: `outputs/training/bc/20260601_022614/debug_bc_coverage_factorized_group_perm_coverage_N4_multi_channel_field_plus_task_id/`
+  - canonical 50-episode final eval:
+    - `success_rate=0.30`
+    - `coverage_ratio=0.758937`
+    - `demand_revisit_excess=23.682952`
+    - `repeated_coverage_ratio=0.991763`
+    - `collision_rate=0.0`
+    - `return=13.441922`
+
+Interpretation:
+
+- V5 proves that persistent route/sweep behavior solves much of coverage: teacher canonical success `0.66`.
+- Plain factorized-group BC does not fully inherit this behavior because the actor is memoryless; it sees visited map but does not maintain a route pointer or persistent assigned target.
+- Static BC improves coverage ratio and demand revisit excess, but not success enough.
+- Next implementation should put persistence into the policy/decision mechanism, not only into the teacher.
+
+Phase58 stateless lawnmower route-head attempt:
+
+- Implemented optional policy route bias:
+  - `use_coverage_lawnmower_route_head`
+  - `coverage_lawnmower_route_strength`
+  - `coverage_lawnmower_*` weights
+- Added factory wiring in `policies/__init__.py`.
+- Added factorized-group forward support.
+- Added tests for factorized-group lawnmower route head.
+- Added configs:
+  - `configs/policy/debug_bc_coverage_factorized_group_lawnmower_perm.yaml`
+  - `configs/policy/debug_ppo_coverage_factorized_group_lawnmower_safe.yaml`
+- Verification:
+  - `/opt/conda/bin/python -m pytest -q tests/test_variable_policies.py tests/test_policy_action_distribution.py`
+  - Result: `22 passed`.
+
+Diagnostic results:
+
+- Direct phase54 best checkpoint evaluated with route-head config on canonical:
+  - CSV: `outputs/debug_long/20260601_phase58_lawnmower_head_eval/eval_phase54_plus_lawnmower_canonical_30ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.0333`
+  - `coverage_ratio=0.672943`
+  - `demand_revisit_excess=27.246735`
+  - `collision_rate=0.014792`
+- Route-head BC run was interrupted/ended after epoch 4:
+  - run: `outputs/training/bc/20260601_025152/debug_bc_coverage_factorized_group_lawnmower_perm_coverage_N4_multi_channel_field_plus_task_id/`
+  - epoch4 checkpoint canonical eval:
+    - CSV: `outputs/debug_long/20260601_phase58_lawnmower_head_eval/eval_lawnmower_bc_epoch4_canonical_30ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+    - `success_rate=0.1333`
+    - `coverage_ratio=0.719913`
+    - `demand_revisit_excess=24.180358`
+    - `collision_rate=0.009542`
+- For comparison, V5 BC without route head was better:
+  - `success_rate=0.30`
+  - `coverage_ratio=0.758937`
+  - `demand_revisit_excess=23.682952`
+  - collision `0`.
+
+Interpretation:
+
+- The stateless route-head is not a valid replacement for V5 persistence.
+- It recomputes stripe targets each step and can conflict with the learned residual actor, causing collisions and lower success.
+- Do not continue this exact lawnmower-head config.
+- The strong result remains the V5 teacher itself; if using it for learning, the model needs genuine temporal persistence/recurrent state or route pointer information, not just a per-step deterministic bias.
+
+Phase59 route-hint observation implementation:
+
+- Stopped the still-running phase58 route-head BC process because phase58 was already empirically worse than V5 BC and should not consume more compute.
+- Added optional coverage env/task persistence without changing observation shape:
+  - `coverage.route_hint_enabled`
+  - `coverage.route_hint_stride`
+  - `coverage.route_hint_sigma`
+  - `coverage.route_hint_value_quantile`
+- Implementation location:
+  - `tasks/coverage.py`
+- Design:
+  - CoverageTask now maintains persistent per-agent stripe/lawnmower routes in `task_state`.
+  - The current route target map is exposed through the existing `formation_template` channel only when `coverage.route_hint_enabled=true`.
+  - This avoids changing `CHANNEL_NAMES` / task field shape, so old CNN checkpoints remain loadable.
+  - Persistence is in env/task state, not in `policy.forward()`, so PPO minibatch logprob recomputation remains valid.
+- Added optional policy-side route-hint bias:
+  - `use_coverage_route_hint_head`
+  - `coverage_route_hint_strength`
+  - `coverage_route_hint_temperature`
+  - `coverage_route_hint_distance_weight`
+- Implementation location:
+  - `policies/cnn_deepsets_policy.py`
+  - `policies/factorized_group_policy.py`
+  - `policies/__init__.py`
+- Added phase59 configs:
+  - `configs/env/debug_coverage_route_hint_canonical.yaml`
+  - `configs/policy/debug_bc_coverage_factorized_group_route_hint_perm.yaml`
+  - `configs/policy/debug_ppo_coverage_factorized_group_route_hint_safe.yaml`
+- Rationale:
+  - V5 teacher succeeded because it has persistent route memory.
+  - Stateless route-head failed because it recomputed targets every step and fought the learned residual actor.
+  - Route-hint observation makes persistence part of the Markov observation instead of hidden policy state, which is the safe path for PPO.
+
+Phase59 direct route-hint checkpoint diagnostics:
+
+- Evaluated phase54 best checkpoint with route-hint env/policy:
+  - CSV: `outputs/debug_long/20260601_phase59_coverage_route_hint/eval_phase54_route_hint_50ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.0`
+  - `coverage_ratio=0.531557`
+  - `collision_rate=0.008700`
+  - `path_length=1.096755`
+  - `repeated_coverage_ratio=0.988878`
+  - `demand_revisit_excess=24.384818`
+  - `return=-219.611562`
+- Evaluated V5-BC checkpoint with route-hint env/policy before sequential suppression:
+  - CSV: `outputs/debug_long/20260601_phase59_coverage_route_hint/eval_v5bc_route_hint_50ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.0`
+  - `coverage_ratio=0.594574`
+  - `collision_rate=0.014675`
+  - `path_length=1.078980`
+  - `repeated_coverage_ratio=0.988729`
+  - `demand_revisit_excess=26.474563`
+  - `return=-213.821676`
+- Added route-hint sequential suppression in the policy head:
+  - `coverage_route_hint_suppression_strength`
+  - `coverage_route_hint_suppression_sigma`
+  - intent: later agents should avoid already selected route-hint peaks, approximating sequential group assignment while keeping `forward()` stateless and replay-safe.
+- Tests:
+  - `/opt/conda/bin/python -m pytest -q tests/test_task_fields.py tests/test_variable_policies.py tests/test_policy_action_distribution.py`
+  - Result: `29 passed`.
+- Evaluated V5-BC checkpoint with suppression:
+  - CSV: `outputs/debug_long/20260601_phase59_coverage_route_hint/eval_v5bc_route_hint_suppression_30ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - `success_rate=0.0`
+  - `coverage_ratio=0.615120`
+  - `collision_rate=0.013708`
+  - `path_length=1.099243`
+  - `repeated_coverage_ratio=0.990041`
+  - `demand_revisit_excess=27.814795`
+  - `return=-213.428082`
+- Interpretation:
+  - Directly adding route-hint bias to old checkpoints is not viable.
+  - The CNN/actor was not trained with this channel and the route-hint map alone lacks a supervised association to the residual behavior.
+  - Continue with route-hint-aware V5 data generation and BC, not more direct checkpoint+bias evaluation.
+
+Phase59 route-hint BC data:
+
+- Generated V5 teacher data under route-hint env:
+  - dataset: `outputs/debug_long/20260601_phase59_coverage_route_hint/v5_route_hint_canonical_e120.npz`
+  - samples: `20210`
+  - episodes: `120`
+  - terminal success: `0.641667`
+  - route-hint channel nonzero fraction: `1.0`
+- First BC attempt failed before training due route-hint suppression OOM:
+  - reason: suppression built a full 64x64 token pair matrix for batch 256, requiring about 32GB CUDA memory.
+- Fix:
+  - added `coverage_route_hint_pool_size` with default `16`.
+  - route-hint head now adaptive-max-pools the hint channel before sequential suppression, matching the existing utility/frontier head pattern.
+
+Phase59 route-hint BC result:
+
+- Route-hint-head BC completed:
+  - run: `outputs/training/bc/20260601_032154/debug_bc_coverage_factorized_group_route_hint_perm_coverage_N4_multi_channel_field_plus_task_id/`
+  - dataset: `outputs/debug_long/20260601_phase59_coverage_route_hint/v5_route_hint_canonical_e120.npz`
+  - env: `configs/env/debug_coverage_route_hint_canonical.yaml`
+  - final eval: `success_rate=0.26`, `coverage_ratio=0.744232`, `collision_rate=0.006125`, `path_length=1.077288`, `repeated_coverage_ratio=0.990756`, `demand_revisit_excess=25.625035`, `return=-103.843146`.
+- Interpretation:
+  - This is not better than V5 BC without route head (`success_rate=0.30`).
+  - The route-hint action bias still interferes with the learned residual actor.
+  - Next attempt should keep the route-hint channel in observation but disable the explicit route-hint action head, so the CNN can learn whether/how to use the channel.
+- Added:
+  - `configs/policy/debug_bc_coverage_factorized_group_route_hint_obs_perm.yaml`
+
+Phase60 per-agent route-target observation implementation:
+
+- Added optional agent observation extension:
+  - config key: `include_route_targets_in_agents`
+  - location: `envs/centralized_env.py`
+  - default: `false`, so old configs/checkpoints keep the original 6-D agent token.
+- When enabled, each agent token appends:
+  - route target delta normalized by map size: `[dx, dy]`
+  - route target position normalized by map size: `[tx, ty]`
+  - resulting agent observation shape: `[N, 10]`.
+- The route targets come from `CoverageTask`'s persistent route state:
+  - `task_state["route_hint_targets"]`
+  - updated when the route-hint field is built.
+- Added BC warm-start compatibility filtering in `scripts/train_bc.py`:
+  - only loads checkpoint tensors whose keys and shapes match the current model;
+  - skips mismatched tensors such as the first agent encoder layer when agent observation size changes.
+- Added configs:
+  - `configs/env/debug_coverage_route_target_agents_canonical.yaml`
+  - `configs/policy/debug_bc_coverage_factorized_group_route_target_agents_perm.yaml`
+  - `configs/policy/debug_ppo_coverage_factorized_group_route_target_agents_safe.yaml`
+- Reason:
+  - route-hint shared heatmap did not give a reliable per-agent route pointer.
+  - V5 teacher is strong because each agent has its own persistent route index; appending target coordinates gives the per-agent actor this missing information without hidden mutable policy state.
+
+Phase60 route-target-agent BC result:
+
+- Fixed `CentralizedMultiUAVEnv` observation space shape for optional agent extensions:
+  - `spaces.Box(shape=agent_low.shape)` instead of hard-coded `(num_agents, 6)`.
+- Tests:
+  - `/opt/conda/bin/python -m pytest -q tests/test_task_fields.py tests/test_variable_policies.py tests/test_policy_action_distribution.py`
+  - Result: `31 passed`.
+- Generated V5 teacher data with per-agent route target features:
+  - dataset: `outputs/debug_long/20260601_phase60_coverage_route_target_agents/v5_route_target_agents_canonical_e120.npz`
+  - samples: `20210`
+  - episodes: `120`
+  - terminal success: `0.641667`
+  - agent tensor shape: `(20210, 4, 10)`
+  - mean absolute route delta features: `0.118764`
+- BC run:
+  - run: `outputs/training/bc/20260601_034310/debug_bc_coverage_factorized_group_route_target_agents_perm_coverage_N4_multi_channel_field_plus_task_id/`
+  - config: `configs/policy/debug_bc_coverage_factorized_group_route_target_agents_perm.yaml`
+  - env: `configs/env/debug_coverage_route_target_agents_canonical.yaml`
+  - init: V5-BC no-route checkpoint, with only `agent_encoder.0.weight` skipped due shape mismatch.
+- Final 50-episode eval:
+  - `success_rate=0.66`
+  - `coverage_ratio=0.797840`
+  - `collision_rate=0.005549`
+  - `path_length=0.882761`
+  - `repeated_coverage_ratio=0.986634`
+  - `demand_revisit_excess=23.928779`
+  - `return=19.242915`
+- Interpretation:
+  - This is the first coverage learning result that matches the V5 teacher success scale.
+  - The decisive fix is not a scalar reward tweak; it is exposing per-agent persistent route targets to the actor while keeping centralized global context.
+  - This supports the user's requested decision model: each agent receives its own waypoint-relevant target, while policy/critic still share full state.
+
+Phase60 route-target-agent PPO result:
+
+- PPO run:
+  - run: `outputs/training/bc_ppo/20260601_phase60_coverage_route_target_agents_ppo/phase60_coverage_route_target_agents_ppo/`
+  - init checkpoint: `outputs/training/bc/20260601_034310/debug_bc_coverage_factorized_group_route_target_agents_perm_coverage_N4_multi_channel_field_plus_task_id/checkpoints/checkpoint_0032.pt`
+  - config: `configs/policy/debug_ppo_coverage_factorized_group_route_target_agents_safe.yaml`
+  - env: `configs/env/debug_coverage_route_target_agents_canonical.yaml`
+- PPO periodic eval:
+  - update 20: `success_rate=0.667`
+  - update 40: `success_rate=0.667`
+  - update 60: `success_rate=0.667`
+  - update 80: `success_rate=0.667`
+  - update 100: `success_rate=0.667`
+  - interpretation: conservative PPO preserved the BC expert; no PPO collapse.
+- PPO final 30-episode eval:
+  - `success_rate=0.666667`
+  - `coverage_ratio=0.803509`
+  - `collision_rate=0.001875`
+  - `path_length=0.900458`
+  - `repeated_coverage_ratio=0.986835`
+  - `demand_revisit_excess=24.186381`
+  - `return=23.276407`
+- Independent best-checkpoint 100-episode eval:
+  - CSV: `outputs/debug_long/20260601_phase60_coverage_route_target_agents/eval_phase60_best_route_target_100ep/coverage_N4_multi_channel_field_plus_task_id.csv`
+  - checkpoint: `outputs/training/bc_ppo/20260601_phase60_coverage_route_target_agents_ppo/phase60_coverage_route_target_agents_ppo/checkpoints/checkpoint_best_eval.pt`
+  - `success_rate=0.72`
+  - `coverage_ratio=0.801508`
+  - `collision_rate=0.002905`
+  - `path_length=0.881318`
+  - `repeated_coverage_ratio=0.986430`
+  - `demand_revisit_excess=23.424259`
+  - `return=35.787137`
+- Current coverage conclusion:
+  - Under the new per-agent route-target decision mode, coverage is now functioning and PPO fine-tuning is stable.
+  - This is not the original canonical `configs/env/coverage.yaml`; it is a coverage environment/observation design change explicitly allowed by the user for coverage debugging.

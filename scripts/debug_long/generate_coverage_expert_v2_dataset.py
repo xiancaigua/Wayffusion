@@ -290,13 +290,155 @@ class CoverageExpertV4:
         return np.clip(action, -1.0, 1.0).astype(np.float32)
 
 
+class CoverageExpertV5:
+    """Stateful lawnmower-route coverage expert for diagnostic teacher data.
+
+    The expert builds one persistent route per agent by splitting remaining
+    demand cells into x-stripes and ordering each stripe in alternating y
+    direction. This is intentionally non-learned and diagnostic: it tests
+    whether route persistence solves the repeated-coverage failure mode better
+    than per-step local frontier scoring.
+    """
+
+    def __init__(self, config: dict):
+        self.max_waypoint_step = float(config["max_waypoint_step"])
+        self.coverage_radius = float(config["coverage_radius"])
+        self.collision_radius = float(config["collision_radius"])
+        self.routes: list[np.ndarray] | None = None
+        self.route_indices: np.ndarray | None = None
+        self.last_progress = -1.0
+
+    def _reset_if_needed(self, progress: float, num_agents: int) -> None:
+        if self.routes is None or self.route_indices is None or len(self.routes) != num_agents or progress <= self.last_progress:
+            self.routes = None
+            self.route_indices = None
+        self.last_progress = progress
+
+    @staticmethod
+    def _grid_value(grid: np.ndarray, point: np.ndarray, map_size: float) -> float:
+        h, w = grid.shape
+        x = int(np.clip(round(float(point[0]) / max(map_size, 1e-6) * (w - 1)), 0, w - 1))
+        y = int(np.clip(round(float(point[1]) / max(map_size, 1e-6) * (h - 1)), 0, h - 1))
+        return float(grid[y, x])
+
+    def _build_routes(self, observation: dict) -> None:
+        positions = observation["agents"][:, :2]
+        task_field = observation["task_field"]
+        map_size = float(observation["global_info"][-1])
+        desired_occupancy = task_field[3]
+        target_probability = task_field[2]
+        obstacle = task_field[0]
+        visited = task_field[5]
+        demand = (desired_occupancy > 0.0) & (obstacle < 0.4)
+        remaining = demand & (visited < 0.95)
+        if not np.any(remaining):
+            remaining = demand
+
+        ys, xs = np.where(remaining)
+        if len(xs) == 0:
+            self.routes = [positions[idx : idx + 1].copy() for idx in range(len(positions))]
+            self.route_indices = np.zeros((len(positions),), dtype=np.int32)
+            return
+
+        stride = 3
+        keep = ((xs + ys) % stride) == 0
+        xs = xs[keep]
+        ys = ys[keep]
+        if len(xs) == 0:
+            ys, xs = np.where(remaining)
+        points = np.stack(
+            [
+                xs / max(desired_occupancy.shape[1] - 1, 1) * map_size,
+                ys / max(desired_occupancy.shape[0] - 1, 1) * map_size,
+            ],
+            axis=-1,
+        ).astype(np.float32)
+        scores = target_probability[ys, xs].astype(np.float32)
+
+        num_agents = len(positions)
+        x_order = np.argsort(positions[:, 0])
+        quantiles = np.quantile(points[:, 0], np.linspace(0.0, 1.0, num_agents + 1))
+        routes: list[np.ndarray] = [np.zeros((0, 2), dtype=np.float32) for _ in range(num_agents)]
+        for stripe_idx, agent_idx in enumerate(x_order):
+            lo = quantiles[stripe_idx] - 1e-6
+            hi = quantiles[stripe_idx + 1] + 1e-6
+            in_stripe = (points[:, 0] >= lo) & (points[:, 0] <= hi)
+            stripe_points = points[in_stripe]
+            stripe_scores = scores[in_stripe]
+            if len(stripe_points) == 0:
+                continue
+            # Keep higher-value cells first, then create an alternating sweep
+            # order to reduce long jumps within the assigned stripe.
+            value_cutoff = np.quantile(stripe_scores, 0.15) if len(stripe_scores) > 8 else float(stripe_scores.min())
+            stripe_points = stripe_points[stripe_scores >= value_cutoff]
+            y_bins = np.linspace(0.0, map_size, max(3, min(9, int(np.sqrt(len(stripe_points))) + 1)))
+            ordered_chunks = []
+            for bin_idx in range(len(y_bins) - 1):
+                in_bin = (stripe_points[:, 1] >= y_bins[bin_idx]) & (stripe_points[:, 1] <= y_bins[bin_idx + 1])
+                chunk = stripe_points[in_bin]
+                if len(chunk) == 0:
+                    continue
+                order = np.argsort(chunk[:, 0])
+                if bin_idx % 2:
+                    order = order[::-1]
+                ordered_chunks.append(chunk[order])
+            route = np.concatenate(ordered_chunks, axis=0) if ordered_chunks else stripe_points
+            start_idx = int(np.argmin(np.linalg.norm(route - positions[agent_idx], axis=1)))
+            routes[int(agent_idx)] = np.concatenate([route[start_idx:], route[:start_idx]], axis=0).astype(np.float32)
+
+        for agent_idx in range(num_agents):
+            if len(routes[agent_idx]) == 0:
+                nearest_idx = int(np.argmin(np.linalg.norm(points - positions[agent_idx], axis=1)))
+                routes[agent_idx] = points[nearest_idx : nearest_idx + 1]
+        self.routes = routes
+        self.route_indices = np.zeros((num_agents,), dtype=np.int32)
+
+    def act(self, observation: dict) -> np.ndarray:
+        positions = observation["agents"][:, :2]
+        progress = float(observation["global_info"][0])
+        map_size = float(observation["global_info"][-1])
+        task_field = observation["task_field"]
+        desired_occupancy = task_field[3]
+        visited = task_field[5]
+        remaining = (desired_occupancy > 0.0).astype(np.float32) * np.clip(1.0 - visited, 0.0, 1.0)
+        self._reset_if_needed(progress, len(positions))
+        if self.routes is None or self.route_indices is None:
+            self._build_routes(observation)
+        assert self.routes is not None
+        assert self.route_indices is not None
+
+        targets = np.zeros_like(positions, dtype=np.float32)
+        for agent_idx, route in enumerate(self.routes):
+            if len(route) == 0:
+                targets[agent_idx] = positions[agent_idx]
+                continue
+            for _ in range(len(route)):
+                target = route[int(self.route_indices[agent_idx]) % len(route)]
+                distance = float(np.linalg.norm(target - positions[agent_idx]))
+                remaining_at_target = self._grid_value(remaining, target, map_size)
+                if distance > 0.65 * self.coverage_radius and remaining_at_target > 0.05:
+                    break
+                self.route_indices[agent_idx] = (self.route_indices[agent_idx] + 1) % len(route)
+            targets[agent_idx] = route[int(self.route_indices[agent_idx]) % len(route)]
+
+        action = (targets - positions) / max(self.max_waypoint_step, 1e-6)
+        rel = positions[:, None, :] - positions[None, :, :]
+        distances = np.linalg.norm(rel, axis=-1, keepdims=True)
+        avoidance_radius = 3.0 * self.collision_radius
+        mask = (distances > 1e-6) & (distances < avoidance_radius)
+        repulsion_scale = (avoidance_radius - np.minimum(distances, avoidance_radius)) / max(avoidance_radius, 1e-6)
+        repulsion = np.where(mask, rel / np.maximum(distances, 1e-6) * repulsion_scale, 0.0).sum(axis=1)
+        action = action + 0.6 * repulsion
+        return np.clip(action, -1.0, 1.0).astype(np.float32)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", type=int, default=40)
     parser.add_argument("--agent_count", type=int, default=4)
     parser.add_argument("--env-config", default="configs/env/multitask.yaml")
     parser.add_argument("--obs_variant", default="multi_channel_field+task_id")
-    parser.add_argument("--expert", choices=["v2", "v3", "v4"], default="v2")
+    parser.add_argument("--expert", choices=["v2", "v3", "v4", "v5"], default="v2")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -308,7 +450,9 @@ def main() -> None:
         observation_override=observation_override_from_variant(args.obs_variant),
     )
     env = CentralizedMultiUAVEnv(env_config)
-    if args.expert == "v4":
+    if args.expert == "v5":
+        policy = CoverageExpertV5(env_config)
+    elif args.expert == "v4":
         policy = CoverageExpertV4(env_config)
     elif args.expert == "v3":
         policy = CoverageExpertV3(env_config)

@@ -80,6 +80,22 @@ class CNNDeepSetsPolicy(nn.Module):
         coverage_frontier_visited_power: float = 1.0,
         coverage_frontier_obstacle_weight: float = -1.2,
         coverage_frontier_agent_density_weight: float = -0.5,
+        use_coverage_lawnmower_route_head: bool = False,
+        coverage_lawnmower_route_strength: float = 0.0,
+        coverage_lawnmower_target_weight: float = 1.0,
+        coverage_lawnmower_desired_weight: float = 3.0,
+        coverage_lawnmower_visited_power: float = 1.2,
+        coverage_lawnmower_obstacle_weight: float = -2.0,
+        coverage_lawnmower_distance_weight: float = 0.25,
+        coverage_lawnmower_stripe_bonus: float = 2.0,
+        coverage_lawnmower_ahead_bonus: float = 0.8,
+        use_coverage_route_hint_head: bool = False,
+        coverage_route_hint_strength: float = 0.0,
+        coverage_route_hint_temperature: float = 10.0,
+        coverage_route_hint_distance_weight: float = 0.6,
+        coverage_route_hint_suppression_strength: float = 6.0,
+        coverage_route_hint_suppression_sigma: float = 0.08,
+        coverage_route_hint_pool_size: int = 16,
         actor_mean_residual_weight: float = 1.0,
         log_std_min: float = -1.5,
         log_std_max: float = 0.5,
@@ -127,6 +143,22 @@ class CNNDeepSetsPolicy(nn.Module):
         self.coverage_frontier_visited_power = float(coverage_frontier_visited_power)
         self.coverage_frontier_obstacle_weight = float(coverage_frontier_obstacle_weight)
         self.coverage_frontier_agent_density_weight = float(coverage_frontier_agent_density_weight)
+        self.use_coverage_lawnmower_route_head = bool(use_coverage_lawnmower_route_head)
+        self.coverage_lawnmower_route_strength = float(coverage_lawnmower_route_strength)
+        self.coverage_lawnmower_target_weight = float(coverage_lawnmower_target_weight)
+        self.coverage_lawnmower_desired_weight = float(coverage_lawnmower_desired_weight)
+        self.coverage_lawnmower_visited_power = float(coverage_lawnmower_visited_power)
+        self.coverage_lawnmower_obstacle_weight = float(coverage_lawnmower_obstacle_weight)
+        self.coverage_lawnmower_distance_weight = float(coverage_lawnmower_distance_weight)
+        self.coverage_lawnmower_stripe_bonus = float(coverage_lawnmower_stripe_bonus)
+        self.coverage_lawnmower_ahead_bonus = float(coverage_lawnmower_ahead_bonus)
+        self.use_coverage_route_hint_head = bool(use_coverage_route_hint_head)
+        self.coverage_route_hint_strength = float(coverage_route_hint_strength)
+        self.coverage_route_hint_temperature = float(coverage_route_hint_temperature)
+        self.coverage_route_hint_distance_weight = float(coverage_route_hint_distance_weight)
+        self.coverage_route_hint_suppression_strength = float(coverage_route_hint_suppression_strength)
+        self.coverage_route_hint_suppression_sigma = float(coverage_route_hint_suppression_sigma)
+        self.coverage_route_hint_pool_size = int(coverage_route_hint_pool_size)
         self.actor_mean_residual_weight = float(actor_mean_residual_weight)
         self.log_std_min = float(log_std_min)
         self.log_std_max = float(log_std_max)
@@ -252,6 +284,10 @@ class CNNDeepSetsPolicy(nn.Module):
             mean = mean + self._coverage_utility_slot_bias(obs, agent_mask)
         if self.use_coverage_frontier_slot_head and self.coverage_frontier_slot_strength > 0.0:
             mean = mean + self._coverage_frontier_slot_bias(obs, agent_mask)
+        if self.use_coverage_lawnmower_route_head and self.coverage_lawnmower_route_strength > 0.0:
+            mean = mean + self._coverage_lawnmower_route_bias(obs, agent_mask)
+        if self.use_coverage_route_hint_head and self.coverage_route_hint_strength > 0.0:
+            mean = mean + self._coverage_route_hint_bias(obs, agent_mask)
         if self.use_spatial_action_head and self.spatial_action_strength > 0.0:
             mean = mean + self._spatial_action_bias(
                 obs,
@@ -500,6 +536,129 @@ class CNNDeepSetsPolicy(nn.Module):
         if agent_mask is not None:
             delta = delta * agent_mask.unsqueeze(-1).float()
         return self.coverage_frontier_slot_strength * delta
+
+    def _coverage_lawnmower_route_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        task_field = obs["task_field"]
+        if task_field.shape[1] < 6:
+            return torch.zeros_like(obs["agents"][..., :2])
+
+        obstacle = task_field[:, 0]
+        target_probability = task_field[:, 2]
+        desired_occupancy = task_field[:, 3]
+        visited = task_field[:, 5]
+        demand = (desired_occupancy > 0.0).to(task_field.dtype)
+        remaining = torch.clamp(1.0 - visited, 0.0, 1.0) ** max(self.coverage_lawnmower_visited_power, 1e-6)
+        utility = (
+            self.coverage_lawnmower_desired_weight * demand * remaining
+            + self.coverage_lawnmower_target_weight * target_probability * remaining
+            + self.coverage_lawnmower_obstacle_weight * obstacle
+        )
+
+        batch_size, height, width = utility.shape
+        ys = torch.linspace(-1.0, 1.0, height, device=utility.device, dtype=utility.dtype)
+        xs = torch.linspace(-1.0, 1.0, width, device=utility.device, dtype=utility.dtype)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([grid_x, grid_y], dim=-1).reshape(height * width, 2)
+        flat_utility = utility.reshape(batch_size, height * width)
+
+        positions = obs["agents"][..., :2]
+        map_size = torch.clamp(obs["global_info"][..., 4:5], min=1e-6).unsqueeze(1)
+        positions_norm = 2.0 * (positions / map_size) - 1.0
+        target_coords = torch.zeros_like(positions_norm)
+        num_agents = int(positions.shape[1])
+        for batch_idx in range(batch_size):
+            valid_count = num_agents
+            if agent_mask is not None:
+                valid_count = max(int(agent_mask[batch_idx].sum().item()), 1)
+            order = torch.argsort(positions_norm[batch_idx, :valid_count, 0])
+            for rank in range(valid_count):
+                agent_idx = int(order[rank].item())
+                stripe_min = -1.0 + 2.0 * float(rank) / float(valid_count)
+                stripe_max = -1.0 + 2.0 * float(rank + 1) / float(valid_count)
+                stripe = ((coords[:, 0] >= stripe_min) & (coords[:, 0] <= stripe_max)).to(utility.dtype)
+                if rank % 2 == 0:
+                    ahead = (coords[:, 1] >= positions_norm[batch_idx, agent_idx, 1] - 0.10).to(utility.dtype)
+                else:
+                    ahead = (coords[:, 1] <= positions_norm[batch_idx, agent_idx, 1] + 0.10).to(utility.dtype)
+                distance = torch.linalg.norm(coords - positions_norm[batch_idx, agent_idx].unsqueeze(0), dim=-1)
+                score = (
+                    flat_utility[batch_idx]
+                    + self.coverage_lawnmower_stripe_bonus * stripe
+                    + self.coverage_lawnmower_ahead_bonus * ahead
+                    - self.coverage_lawnmower_distance_weight * distance
+                )
+                impossible = (demand[batch_idx].reshape(-1) <= 0.0) | (obstacle[batch_idx].reshape(-1) >= 0.5)
+                score = torch.where(impossible, torch.full_like(score, -1e9), score)
+                target_coords[batch_idx, agent_idx] = coords[int(torch.argmax(score).item())]
+
+        delta = torch.clamp(target_coords - positions_norm, -2.0, 2.0)
+        if agent_mask is not None:
+            delta = delta * agent_mask.unsqueeze(-1).float()
+        return self.coverage_lawnmower_route_strength * delta
+
+    def _coverage_route_hint_bias(
+        self,
+        obs: dict[str, torch.Tensor],
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        task_field = obs["task_field"]
+        if task_field.shape[1] < 9:
+            return torch.zeros_like(obs["agents"][..., :2])
+
+        route_hint = task_field[:, 8]
+        if self.coverage_route_hint_pool_size > 0:
+            pool_size = min(int(self.coverage_route_hint_pool_size), int(route_hint.shape[-2]), int(route_hint.shape[-1]))
+            route_hint = F.adaptive_max_pool2d(route_hint.unsqueeze(1), (pool_size, pool_size)).squeeze(1)
+        batch_size, height, width = route_hint.shape
+        ys = torch.linspace(-1.0, 1.0, height, device=route_hint.device, dtype=route_hint.dtype)
+        xs = torch.linspace(-1.0, 1.0, width, device=route_hint.device, dtype=route_hint.dtype)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([grid_x, grid_y], dim=-1).reshape(1, height * width, 2).expand(batch_size, -1, -1)
+        logits = self.coverage_route_hint_temperature * route_hint.reshape(batch_size, 1, height * width)
+
+        positions = obs["agents"][..., :2]
+        map_size = torch.clamp(obs["global_info"][..., 4:5], min=1e-6).unsqueeze(1)
+        positions_norm = 2.0 * (positions / map_size) - 1.0
+        distance = torch.linalg.norm(coords.unsqueeze(1) - positions_norm.unsqueeze(2), dim=-1)
+        logits = logits.expand(-1, positions.shape[1], -1) - self.coverage_route_hint_distance_weight * distance
+        weights = self._coverage_route_hint_weights(logits, coords, agent_mask)
+        target_coords = torch.einsum("bnt,btc->bnc", weights, coords)
+        delta = torch.clamp(target_coords - positions_norm, -2.0, 2.0)
+        if agent_mask is not None:
+            delta = delta * agent_mask.unsqueeze(-1).float()
+        return self.coverage_route_hint_strength * delta
+
+    def _coverage_route_hint_weights(
+        self,
+        logits: torch.Tensor,
+        spatial_coords: torch.Tensor,
+        agent_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.coverage_route_hint_suppression_strength <= 0.0:
+            weights = torch.softmax(logits, dim=-1)
+            if agent_mask is not None:
+                weights = weights * agent_mask.unsqueeze(-1).float()
+            return weights
+
+        coords_rel = spatial_coords.unsqueeze(2) - spatial_coords.unsqueeze(1)
+        dist_sq = (coords_rel ** 2).sum(dim=-1)
+        sigma = max(self.coverage_route_hint_suppression_sigma, 1e-6)
+        suppression_kernel = torch.exp(-dist_sq / sigma)
+        batch_size, num_agents, num_tokens = logits.shape
+        weights = torch.zeros_like(logits)
+        suppression = torch.zeros((batch_size, num_tokens), device=logits.device, dtype=logits.dtype)
+        for agent_idx in range(num_agents):
+            adjusted_logits = logits[:, agent_idx, :] - self.coverage_route_hint_suppression_strength * suppression
+            current_weights = torch.softmax(adjusted_logits, dim=-1)
+            if agent_mask is not None:
+                current_weights = current_weights * agent_mask[:, agent_idx].unsqueeze(-1).float()
+            weights[:, agent_idx, :] = current_weights
+            suppression = suppression + torch.einsum("bt,bts->bs", current_weights, suppression_kernel)
+        return weights
 
     def _coverage_frontier_weights(
         self,

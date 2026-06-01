@@ -117,3 +117,14 @@ coverage 的问题不是 PPO 完全不能更新，而是缺少稳定的低重复
 2. 用该 teacher 生成 coverage BC/DAgger 数据。
 3. 再用 `factorized_group` conservative PPO 微调。
 4. 最终用 canonical 100-episode eval 判定是否真正调通。
+
+## 2026-06-01 coverage 后续修正
+
+最新 coverage 调试允许修改 coverage 训练环境和 reward。基于 `repeated_coverage_ratio≈0.99` 的失败模式，新增了更直接的强惩罚：
+
+- `repeated_demand_coverage`：每一步惩罚重复覆盖已经满足的 demand cells，信号比 timeout penalty 更早。
+- `terminal_revisit_excess`：终局惩罚 demand 区域累计超额访问量，用来区分高效 sweep 和原地反复覆盖。
+
+同时 `factorized_group` 新增可选 sequential group context：后续 group token 会接收前序 group 输出目标坐标的信息。这保留 centralized critic 和 `[B, N, 2]` joint action 输出，但让 group-level 决策从“并行独立提案”变为“按组有条件提案”，更符合分组航点分配。
+
+还修复了一个重要实验可信度问题：`coverage_frontier_*` 配置此前没有从 policy factory 传入 policy 构造函数，因此 frontier-slot phase 的配置开关实际没有生效。之后所有 frontier 结论需要以修复后的 run 为准。

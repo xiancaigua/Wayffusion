@@ -85,7 +85,18 @@ def main():
     trainer = BCTrainer(policy, policy_config)
     if args.init_checkpoint:
         checkpoint = torch.load(args.init_checkpoint, map_location=trainer.device)
-        trainer.policy.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        current_state = trainer.policy.state_dict()
+        compatible_state = {
+            key: value
+            for key, value in checkpoint["model_state_dict"].items()
+            if key in current_state and current_state[key].shape == value.shape
+        }
+        skipped_keys = sorted(set(checkpoint["model_state_dict"]) - set(compatible_state))
+        trainer.policy.load_state_dict(compatible_state, strict=False)
+        if skipped_keys:
+            preview = ", ".join(skipped_keys[:8])
+            suffix = "..." if len(skipped_keys) > 8 else ""
+            print(f"bc_init_skipped_mismatched_or_missing={len(skipped_keys)} [{preview}{suffix}]")
     run_name = f"{policy_config['name']}_{format_task_set_name(task_names)}_N{format_agent_set_name(agent_counts)}_{format_obs_variant_name(args.obs_variant)}"
     output_dir = timestamped_training_dir("bc", run_name)
     save_run_snapshot(

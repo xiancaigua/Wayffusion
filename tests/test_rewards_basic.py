@@ -124,6 +124,22 @@ def test_coverage_new_coverage_component_is_positive():
     assert result.components["coverage_reward"] > 0.0
 
 
+def test_coverage_demand_quantile_controls_demand_area():
+    base_config = load_env_config("configs/env/multitask.yaml", override={"task_name": "coverage"})
+    focused_config = load_env_config(
+        "configs/env/multitask.yaml",
+        override={"task_name": "coverage", "coverage": {"demand_quantile": 0.75}},
+    )
+    base_env = CentralizedMultiUAVEnv(base_config)
+    focused_env = CentralizedMultiUAVEnv(focused_config)
+    base_env.reset(seed=12)
+    focused_env.reset(seed=12)
+
+    base_area = float(base_env.current_task_state["coverage_demand"].mean())
+    focused_area = float(focused_env.current_task_state["coverage_demand"].mean())
+    assert focused_area < base_area
+
+
 def test_coverage_failure_penalty_only_on_unsuccessful_timeout():
     env = CentralizedMultiUAVEnv(
         load_env_config(
@@ -288,6 +304,59 @@ def test_coverage_terminal_repeated_penalty_only_on_timeout():
     env_state["step_count"] = int(env_state["max_steps"])
     terminal = task.compute_reward(task_state, prev_state, env_state, transition)
     assert terminal.components["terminal_repeated_coverage_penalty"] < 0.0
+
+
+def test_coverage_demand_revisit_penalties_are_configurable():
+    env = CentralizedMultiUAVEnv(
+        load_env_config(
+            "configs/env/multitask.yaml",
+            override={
+                "task_name": "coverage",
+                "reward_weights": {
+                    "coverage": {
+                        "new_coverage": 0.0,
+                        "high_probability": 0.0,
+                        "coverage_level": 0.0,
+                        "coverage_shortfall": 0.0,
+                        "repeated_coverage": 0.0,
+                        "repeated_demand_coverage": -3.0,
+                        "terminal_repeated_coverage": 0.0,
+                        "terminal_revisit_excess": -2.0,
+                        "success_bonus": 0.0,
+                        "failure_penalty": 0.0,
+                    }
+                },
+            },
+        )
+    )
+    env.reset(seed=14)
+    task = env.current_task
+    task_state = deepcopy(env.current_task_state)
+    prev_state = env._snapshot_state()
+    env_state = env._snapshot_state()
+    demand = task_state["coverage_demand"].astype(np.float32)
+    prev_state["visit_count_map"] = demand.copy()
+    env_state["visit_count_map"] = 2.0 * demand.copy()
+    env_state["step_coverage_mask"] = demand.copy()
+    transition = {
+        "pair_collision_count": 0,
+        "obstacle_collision_count": 0,
+        "path_length_delta": 0.0,
+        "step_risk_exposure": 0.0,
+        "step_safety_violations": 0,
+        "num_agents": env.num_agents,
+        "spatial_scale": env.runtime_params["spatial_scale"],
+        "max_step_distance": env.runtime_params["max_speed"] * float(env.config["dt"]),
+    }
+
+    result = task.compute_reward(task_state, prev_state, env_state, transition)
+    assert result.components["repeated_demand_coverage_penalty"] < 0.0
+    assert result.components["terminal_revisit_excess_penalty"] == 0.0
+
+    env_state["step_count"] = int(env_state["max_steps"])
+    terminal = task.compute_reward(task_state, prev_state, env_state, transition)
+    assert terminal.metrics["demand_revisit_excess"] > 0.0
+    assert terminal.components["terminal_revisit_excess_penalty"] < 0.0
 
 
 def test_risk_nav_high_exposure_produces_negative_task_penalty():
